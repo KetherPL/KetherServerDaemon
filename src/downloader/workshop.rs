@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use async_trait::async_trait;
 use std::path::PathBuf;
-use tracing::{info, warn};
-use crate::downloader::{client::HttpClient, traits::Downloader};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
+use tracing::info;
+use uuid::Uuid;
+use crate::downloader::{
+    client::HttpClient,
+    steam::{SteamConnection, SteamError},
+    traits::Downloader,
+};
 
 pub struct WorkshopDownloader {
     client: HttpClient,
     temp_dir: PathBuf,
+    steam_connection: Arc<OnceCell<Result<SteamConnection, SteamError>>>,
 }
 
 impl WorkshopDownloader {
@@ -14,26 +22,67 @@ impl WorkshopDownloader {
         Ok(Self {
             client: HttpClient::new()?,
             temp_dir,
+            steam_connection: Arc::new(OnceCell::new()),
         })
     }
     
+    /// Get or initialize Steam connection
+    async fn get_steam_connection(&self) -> anyhow::Result<&SteamConnection> {
+        self.steam_connection
+            .get_or_init(|| async { SteamConnection::new().await })
+            .await
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("Failed to establish Steam connection: {}", e))
+    }
+    
     async fn download_workshop_item(&self, workshop_id: u64) -> anyhow::Result<PathBuf> {
-        // Steam Workshop download URL format
-        // Note: This is a simplified implementation. Real Steam Workshop downloads
-        // require authentication and use SteamCMD or the Steam API.
-        let url = format!("https://steamcommunity.com/sharedfiles/filedetails/?id={}", workshop_id);
+        info!(workshop_id, "Starting Steam Workshop download");
         
-        info!(workshop_id, "Attempting to download from Steam Workshop");
+        // Get Steam connection (lazy-initialized, reused across calls)
+        let steam = self.get_steam_connection().await?;
         
-        // For now, we'll need to use SteamCMD or a similar tool.
-        // This is a placeholder implementation that would need to be extended
-        // with actual Steam Workshop download logic.
-        warn!(workshop_id, "Steam Workshop download not fully implemented - requires SteamCMD integration");
+        // Step 1: Get hcontent from workshop ID
+        let hcontent = steam
+            .get_hcontent_from_workshop_id(workshop_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get hcontent: {}", e))?;
         
-        Err(anyhow::anyhow!(
-            "Steam Workshop downloads require SteamCMD integration. Workshop ID: {}",
-            workshop_id
-        ))
+        // Step 2: Get download URL from hcontent
+        let download_url = steam
+            .get_download_url(hcontent)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get download URL: {}", e))?;
+        
+        // Step 3: Download file using existing HTTP client
+        let filename = download_url
+            .split('/')
+            .last()
+            .unwrap_or("workshop_download")
+            .split('?')
+            .next()
+            .unwrap_or("workshop_download");
+        
+        let output_path = self.temp_dir.join(format!("{}-{}", Uuid::new_v4(), filename));
+        
+        info!(
+            workshop_id,
+            url = %download_url,
+            path = %output_path.display(),
+            "Downloading workshop file"
+        );
+        
+        self.client
+            .download_with_retry(&download_url, &output_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to download file: {}", e))?;
+        
+        info!(
+            workshop_id,
+            path = %output_path.display(),
+            "Workshop download completed"
+        );
+        
+        Ok(output_path)
     }
 }
 
