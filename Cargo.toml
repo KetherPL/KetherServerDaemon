@@ -1,0 +1,78 @@
+[package]
+name = "KetherServerDaemon"
+version = "0.0.1"
+edition = "2024"
+license = "GPL-3.0-only"
+authors = ["Dominik Adrian Grzywak"]
+rust-version = "1.85"
+
+[dependencies]
+# Existing dependency
+sourcepak = { version = "0.3.0", features = ["mem-map"] }
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# HTTP server and WebSocket
+axum = { version = "0.7", features = ["ws", "json"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+# SQLite
+sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "sqlite", "chrono"] }
+
+# Configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = { version = "0.8", features = ["parse"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "ansi", "json"] }
+
+# Filesystem watching
+notify = "6.1"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# URL parsing
+url = "2.5"
+
+# Async traits
+async-trait = "0.1"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# ZIP extraction
+zip = "0.6"
+
+# Utilities
+uuid = { version = "1.10", features = ["v4", "serde"] }
+tempfile = "3.10"
+futures-util = "0.3"
+
+# The default release profile. It contains all optimizations, without
+# sacrificing debug info. With this profile (like in the standard
+# release profile), the debug info and the stack traces will still be available.
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+
+# A release-like profile that is tuned to be fast, even when being fast
+# compromises on binary size. This includes aborting on panic.
+[profile.release-fast]
+inherits = "release"
+panic = "abort"
+
+# A release-like profile that is as small as possible.
+[profile.release-small]
+inherits = "release"
+opt-level = "z"
+panic = "abort"
+strip = true

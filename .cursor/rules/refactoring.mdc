@@ -1,0 +1,71 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+# Refactoring Rule (Fowler-Inspired)
+
+When the user asks for a refactor (single file or whole project), follow these principles:
+
+## Core Approach
+1. **Behavior must not change**  
+   - Treat every refactor as a sequence of behavior-preserving transformations.  
+   - Rely on existing tests or add smoke checks when coverage is missing. Pause and confirm with the user if confidence is low.  
+   - Document public API contracts before refactoring; confirm they remain unchanged afterward.
+
+2. **Small, safe steps**  
+   - Apply the smallest viable transformations from Fowler’s catalog (e.g., Extract Method, Rename Variable, Introduce Assertion).  
+   - After each logical change, ensure the code still compiles; run targeted tests when practical.  
+   - Keep each step atomic and reversible; maintain a ledger of applied transformations for rollback.
+
+3. **Explain intent**  
+   - Describe what smells were detected and which catalog refactorings you selected.  
+   - Summarize how each change improves readability, flexibility, or duplication.  
+   - Cite trade-offs (e.g., performance impact, deferred cleanups) and note migration strategies if APIs are affected.
+
+4. **Two Hats Discipline**  
+   - Operate strictly in either “Feature” mode or “Refactor” mode; never mix both in one session.  
+   - Ensure commit hygiene: one commit per logical refactoring, no feature edits mixed in.
+
+## 80/20 Focus
+Prioritize the 20% of refactorings that eliminate 80% of the maintenance pain:
+- Naming clarity (rename unclear symbols, expose intent)  
+- Method/function extraction (break up long or multi-purpose blocks)  
+- Duplication removal (extract shared helpers, consolidate logic)  
+- Class/module splitting (separate responsibilities when files have multiple reasons to change)  
+- Primitive obsession removal (replace data clumps or long parameter lists with meaningful abstractions)  
+- Conditional simplification (replace nested conditionals or switch statements with polymorphism or strategies)
+
+## Workflow
+1. **Assess & Plan**  
+   - Identify smells, reference Fowler terminology, decide the minimal set of catalog moves.  
+   - If scope is large, propose milestones before editing.  
+   - Estimate test coverage and risk; add characterization tests if gaps exist.  
+   - Identify hotspots (high-change, high-risk files) and tread lighter.
+
+2. **Execute Refactor**  
+   - Carry out the plan iteratively, verifying behavior after each risky step.  
+   - Keep diffs focused; avoid drive-by feature tweaks.  
+   - Apply smell-to-action mapping consistently (e.g., duplication → Extract Method, long parameter list → Introduce Parameter Object).  
+   - Ensure dependency direction is preserved; avoid introducing cycles.
+
+3. **Validate**  
+   - Re-run relevant tests or builds.  
+   - Confirm public API contracts unchanged.  
+   - Track complexity metrics (cyclomatic complexity, fan-in/out) and ensure no regressions.  
+   - Note any residual risks or areas needing follow-up tests.  
+   - Monitor runtime performance for hot paths before/after refactor.
+
+## Communication
+- Cite the applied catalog refactorings in the final summary.  
+- Call out any trade-offs, performance impacts, or deferred cleanups.  
+- If refactor scope escalates, pause for confirmation before proceeding.  
+- Provide a concise smell-to-action mapping in the summary (e.g., “Duplicated code → Extract Method”).  
+- Update documentation or READMEs only after code changes settle; keep summaries factual and terse.
+
+## Safety Net
+- Add assertions for invariants in critical paths (Introduce Assertion).  
+- Use characterization tests around risky areas before major transformations.  
+- Maintain observability: track latency and error rates for hot paths before/after refactor.  
+- Ensure every step is independently revertible; rollback if tests fail.
+
