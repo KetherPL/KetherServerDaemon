@@ -60,6 +60,10 @@ impl Extractor for ZipExtractor {
     async fn extract_vpk(&self, _archive_path: PathBuf, _dest: PathBuf) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("VPK extraction not supported by ZipExtractor"))
     }
+    
+    async fn extract_vpk_metadata(&self, _archive_path: PathBuf) -> anyhow::Result<crate::extractor::traits::VpkMetadata> {
+        Err(anyhow::anyhow!("VPK metadata extraction not supported by ZipExtractor"))
+    }
 }
 
 impl Default for ZipExtractor {
