@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tracing::info;
 use crate::api::handlers::{ApiHandlers, ApiResponse, InstallMapRequest};
 use crate::registry::{MapEntry, Registry};
+use crate::map_installer::MapInstallationService;
 
 pub struct HttpServer {
     handlers: ApiHandlers,
@@ -17,9 +18,13 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub fn new(registry: Arc<dyn Registry>, addr: SocketAddr) -> Self {
+    pub fn new(
+        registry: Arc<dyn Registry>,
+        installer: Arc<MapInstallationService>,
+        addr: SocketAddr,
+    ) -> Self {
         Self {
-            handlers: ApiHandlers::new(registry),
+            handlers: ApiHandlers::new(registry, installer),
             addr,
         }
     }

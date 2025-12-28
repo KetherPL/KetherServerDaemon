@@ -4,22 +4,22 @@ mod config;
 mod downloader;
 mod extractor;
 mod logging;
+mod map_installer;
 mod registry;
 mod sync;
 mod watcher;
 
 use std::sync::Arc;
 use tokio::signal;
-use tokio::sync::RwLock;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 use config::Config;
 use logging::setup_logging;
-use registry::{MapEntry, Registry, SqliteRegistry};
+use registry::{Registry, SqliteRegistry};
 use sync::{BackendSyncService, SyncService};
 use watcher::{InotifyWatcher, Watcher};
-use api::{ApiHandlers, HttpServer, WebSocketServer};
+use api::HttpServer;
+use map_installer::MapInstallationService;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -51,8 +51,19 @@ async fn main() -> anyhow::Result<()> {
     let temp_dir = std::env::temp_dir().join("kether-downloads");
     tokio::fs::create_dir_all(&temp_dir).await?;
     
+    // Initialize map installation service
+    let installer = Arc::new(
+        MapInstallationService::new(
+            Arc::clone(&registry),
+            addons_dir.clone(),
+            temp_dir.clone(),
+        )
+        .await?
+    );
+    info!("Map installation service initialized");
+    
     // Spawn tasks
-    let registry_watcher = Arc::clone(&registry);
+    let installer_watcher = Arc::clone(&installer);
     let watcher_task = tokio::spawn(async move {
         info!("Watcher task started");
         let mut receiver = watcher_events;
@@ -60,11 +71,15 @@ async fn main() -> anyhow::Result<()> {
             match event {
                 watcher::WatcherEvent::Create(path) => {
                     info!(path = %path.display(), "File created in addons directory");
-                    // TODO: Detect new map installations and update registry
+                    // Detect new map installations
+                    if let Err(e) = installer_watcher.detect_map_from_path(path).await {
+                        warn!(error = %e, "Failed to detect map from path");
+                    }
                 }
                 watcher::WatcherEvent::Remove(path) => {
                     info!(path = %path.display(), "File removed from addons directory");
-                    // TODO: Detect map removals and update registry
+                    // Map removal is handled by explicit uninstall - filesystem watcher
+                    // may detect manual deletions, but we don't auto-remove from registry
                 }
                 watcher::WatcherEvent::Modify(path) => {
                     info!(path = %path.display(), "File modified in addons directory");
@@ -73,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
     
-    let registry_sync = Arc::clone(&registry);
+    let installer_sync = Arc::clone(&installer);
     let sync_service_clone = Arc::clone(&sync_service);
     let sync_interval = config.sync_interval_secs;
     let sync_task = tokio::spawn(async move {
@@ -89,11 +104,35 @@ async fn main() -> anyhow::Result<()> {
                         match update.action.as_str() {
                             "install" => {
                                 info!(map_id = %update.map_id, "Backend requested map installation");
-                                // TODO: Implement map installation logic
+                                if let Some(ref map_entry) = update.map_entry {
+                                    // Check if we have a workshop ID first
+                                    if let Some(workshop_id) = map_entry.workshop_id {
+                                        // Install from workshop ID
+                                        if let Err(e) = installer_sync
+                                            .install_from_workshop_id(workshop_id)
+                                            .await
+                                        {
+                                            error!(error = %e, map_id = %update.map_id, workshop_id, "Failed to install workshop map");
+                                        }
+                                    } else {
+                                        // Install from URL
+                                        if let Err(e) = installer_sync
+                                            .install_from_url(
+                                                map_entry.source_url.clone(),
+                                                Some(map_entry.name.clone()),
+                                            )
+                                            .await
+                                        {
+                                            error!(error = %e, map_id = %update.map_id, "Failed to install map from backend");
+                                        }
+                                    }
+                                } else {
+                                    warn!(map_id = %update.map_id, "Backend update missing installation details");
+                                }
                             }
                             "uninstall" => {
                                 info!(map_id = %update.map_id, "Backend requested map uninstallation");
-                                if let Err(e) = registry_sync.remove_map(&update.map_id).await {
+                                if let Err(e) = installer_sync.uninstall_map(&update.map_id).await {
                                     error!(error = %e, map_id = %update.map_id, "Failed to uninstall map");
                                 }
                             }
@@ -109,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
             }
             
             // Push local state to backend
-            match registry_sync.list_maps().await {
+            match installer_sync.registry().list_maps().await {
                 Ok(maps) => {
                     if let Err(e) = sync_service_clone.sync_registry(maps).await {
                         error!(error = %e, "Failed to sync registry to backend");
@@ -124,8 +163,9 @@ async fn main() -> anyhow::Result<()> {
     
     // Start HTTP server
     let registry_http = Arc::clone(&registry);
+    let installer_http = Arc::clone(&installer);
     let http_addr = config.local_api_bind;
-    let http_server = HttpServer::new(registry_http, http_addr);
+    let http_server = HttpServer::new(registry_http, installer_http, http_addr);
     let http_task = tokio::spawn(async move {
         if let Err(e) = http_server.serve().await {
             error!(error = %e, "HTTP server error");

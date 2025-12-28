@@ -5,9 +5,9 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info};
-use uuid::Uuid;
 
 use crate::registry::{MapEntry, Registry};
+use crate::map_installer::MapInstallationService;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstallMapRequest {
@@ -42,11 +42,12 @@ impl<T> ApiResponse<T> {
 
 pub struct ApiHandlers {
     registry: Arc<dyn Registry>,
+    installer: Arc<MapInstallationService>,
 }
 
 impl ApiHandlers {
-    pub fn new(registry: Arc<dyn Registry>) -> Self {
-        Self { registry }
+    pub fn new(registry: Arc<dyn Registry>, installer: Arc<MapInstallationService>) -> Self {
+        Self { registry, installer }
     }
 }
 
@@ -85,19 +86,25 @@ impl ApiHandlers {
         &self,
         Json(request): Json<InstallMapRequest>,
     ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-        // This is a stub - actual installation would require downloader and extractor
-        // The actual implementation would be in the main service loop
-        let map_id = Uuid::new_v4().to_string();
-        info!(map_id = %map_id, url = %request.url, "Install map request received");
+        info!(url = %request.url, "Install map request received");
         
-        Ok(Json(ApiResponse::success(map_id)))
+        match self.installer.install_from_url(request.url, request.name).await {
+            Ok(map_entry) => {
+                info!(map_id = %map_entry.id, "Map installed successfully");
+                Ok(Json(ApiResponse::success(map_entry.id)))
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to install map");
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
     }
     
     pub async fn uninstall_map(
         &self,
         Path(id): Path<String>,
     ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-        match self.registry.remove_map(&id).await {
+        match self.installer.uninstall_map(&id).await {
             Ok(()) => {
                 info!(map_id = %id, "Map uninstalled");
                 Ok(Json(ApiResponse::success(())))
