@@ -11,7 +11,13 @@ use crate::map_installer::MapInstallationService;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstallMapRequest {
-    pub url: String,
+    /// HTTP/HTTPS URL for ZIP file download (only used when workshop_id is not provided)
+    pub url: Option<String>,
+    
+    /// Steam Workshop ID (only used when url is not provided)
+    pub workshop_id: Option<u64>,
+    
+    /// Optional map name override
     pub name: Option<String>,
 }
 
@@ -82,31 +88,67 @@ impl ApiHandlers {
         &self,
         Json(request): Json<InstallMapRequest>,
     ) -> Result<Json<ApiResponse<String>>, StatusCode> {
-        info!(url = %request.url, "Install map request received");
-        
-        // Validate URL length
-        if request.url.len() > 2048 {
-            error!("URL too long: {} characters", request.url.len());
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        
-        // Validate map name length if provided
-        if let Some(ref name) = request.name {
-            if name.len() > 255 {
-                error!("Map name too long: {} characters", name.len());
+        // Validate that exactly one of url or workshop_id is provided
+        match (request.url.as_ref(), request.workshop_id) {
+            (Some(_), Some(_)) => {
+                error!("Both url and workshop_id provided, but only one is allowed");
                 return Err(StatusCode::BAD_REQUEST);
             }
-        }
-        
-        // URL validation is performed in parse_url and install_from_url
-        match self.installer.install_from_url(request.url, request.name).await {
-            Ok(map_entry) => {
-                info!(map_id = %map_entry.id, "Map installed successfully");
-                Ok(Json(ApiResponse::success(map_entry.id)))
+            (None, None) => {
+                error!("Neither url nor workshop_id provided, one is required");
+                return Err(StatusCode::BAD_REQUEST);
             }
-            Err(e) => {
-                error!(error = %e, "Failed to install map");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            (Some(url), None) => {
+                info!(url = %url, "Install map request received with URL");
+                
+                // Validate URL length
+                if url.len() > 2048 {
+                    error!("URL too long: {} characters", url.len());
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                
+                // Validate map name length if provided
+                if let Some(ref name) = request.name {
+                    if name.len() > 255 {
+                        error!("Map name too long: {} characters", name.len());
+                        return Err(StatusCode::BAD_REQUEST);
+                    }
+                }
+                
+                // Install from URL
+                match self.installer.install_from_url(url.clone(), request.name).await {
+                    Ok(map_entry) => {
+                        info!(map_id = %map_entry.id, "Map installed successfully");
+                        Ok(Json(ApiResponse::success(map_entry.id)))
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to install map");
+                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                }
+            }
+            (None, Some(workshop_id)) => {
+                info!(workshop_id, "Install map request received with workshop ID");
+                
+                // Validate map name length if provided
+                if let Some(ref name) = request.name {
+                    if name.len() > 255 {
+                        error!("Map name too long: {} characters", name.len());
+                        return Err(StatusCode::BAD_REQUEST);
+                    }
+                }
+                
+                // Install from workshop ID
+                match self.installer.install_from_workshop_id(workshop_id, request.name).await {
+                    Ok(map_entry) => {
+                        info!(map_id = %map_entry.id, "Map installed successfully");
+                        Ok(Json(ApiResponse::success(map_entry.id)))
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to install map");
+                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                }
             }
         }
     }

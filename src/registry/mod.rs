@@ -3,7 +3,7 @@ pub mod models;
 pub mod traits;
 pub mod sqlite;
 
-pub use models::MapEntry;
+pub use models::{MapEntry, SourceKind};
 pub use traits::Registry;
 pub use sqlite::SqliteRegistry;
 

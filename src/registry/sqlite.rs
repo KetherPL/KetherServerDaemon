@@ -2,8 +2,8 @@
 use async_trait::async_trait;
 use sqlx::{sqlite::SqlitePool, Row};
 use std::path::PathBuf;
-use crate::registry::{models::MapEntry, traits::Registry};
-use tracing::{error, info};
+use crate::registry::{models::{MapEntry, SourceKind}, traits::Registry};
+use tracing::{error, info, warn};
 
 pub struct SqliteRegistry {
     pool: SqlitePool,
@@ -21,6 +21,7 @@ impl SqliteRegistry {
     }
     
     async fn init_schema(&self) -> anyhow::Result<()> {
+        // Create table if it doesn't exist
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS maps (
@@ -37,22 +38,102 @@ impl SqliteRegistry {
         .execute(&self.pool)
         .await?;
         
+        // Add new columns if they don't exist (migration)
+        self.migrate_schema().await?;
+        
         info!("Initialized SQLite registry schema");
+        Ok(())
+    }
+    
+    async fn migrate_schema(&self) -> anyhow::Result<()> {
+        // Check if source_kind column exists by trying to query it
+        let result = sqlx::query("SELECT source_kind FROM maps LIMIT 1")
+            .fetch_optional(&self.pool)
+            .await;
+        
+        if result.is_err() {
+            // Column doesn't exist, need to add it
+            info!("Migrating database schema: adding new columns");
+            
+            // Add source_kind column with default value
+            sqlx::query(
+                r#"
+                ALTER TABLE maps ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'other'
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+            
+            // Update existing records: if workshop_id is not null, set source_kind to 'workshop'
+            sqlx::query(
+                r#"
+                UPDATE maps SET source_kind = 'workshop' WHERE workshop_id IS NOT NULL
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+            
+            // Add checksum column (nullable)
+            sqlx::query(
+                r#"
+                ALTER TABLE maps ADD COLUMN checksum TEXT
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+            
+            // Add checksum_kind column (nullable)
+            sqlx::query(
+                r#"
+                ALTER TABLE maps ADD COLUMN checksum_kind TEXT
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+            
+            // Note: For existing records with absolute paths, we can't automatically
+            // convert them to relative paths without knowing the addons_dir.
+            // This will be handled at read time or require manual migration.
+            warn!("Database migrated. Existing absolute paths in installed_path may need manual conversion to relative paths.");
+        }
+        
         Ok(())
     }
     
     fn map_entry_from_row(&self, row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<MapEntry> {
         use chrono::DateTime;
         
+        let source_kind_str: String = row.try_get::<String, _>("source_kind")
+            .unwrap_or_else(|_| "other".to_string()); // Default to "other" for old records
+        let source_kind = match source_kind_str.as_str() {
+            "workshop" => SourceKind::Workshop,
+            "other" => SourceKind::Other,
+            _ => {
+                warn!(source_kind = %source_kind_str, "Unknown source_kind, defaulting to 'other'");
+                SourceKind::Other
+            }
+        };
+        
+        let workshop_id = row.get::<Option<i64>, _>("workshop_id").map(|v| v as u64);
+        // Ensure workshop_id is None if source_kind is not Workshop
+        let workshop_id = if source_kind == SourceKind::Workshop {
+            workshop_id
+        } else {
+            None
+        };
+        
         Ok(MapEntry {
             id: row.get::<String, _>("id"),
             name: row.get::<String, _>("name"),
             source_url: row.get::<String, _>("source_url"),
-            workshop_id: row.get::<Option<i64>, _>("workshop_id").map(|v| v as u64),
-            installed_path: PathBuf::from(row.get::<String, _>("installed_path")),
+            source_kind,
+            workshop_id,
+            installed_path: row.get::<String, _>("installed_path"), // Now stored as String
             installed_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("installed_at"))?
                 .with_timezone(&chrono::Utc),
             version: row.get::<Option<String>, _>("version"),
+            checksum: row.try_get("checksum").ok(),
+            checksum_kind: row.try_get("checksum_kind").ok(),
         })
     }
 }
@@ -60,19 +141,34 @@ impl SqliteRegistry {
 #[async_trait]
 impl Registry for SqliteRegistry {
     async fn add_map(&self, entry: MapEntry) -> anyhow::Result<()> {
+        let source_kind_str = match entry.source_kind {
+            SourceKind::Workshop => "workshop",
+            SourceKind::Other => "other",
+        };
+        
+        // Ensure workshop_id is None if source_kind is not Workshop
+        let workshop_id = if entry.source_kind == SourceKind::Workshop {
+            entry.workshop_id.map(|v| v as i64)
+        } else {
+            None
+        };
+        
         sqlx::query(
             r#"
-            INSERT INTO maps (id, name, source_url, workshop_id, installed_path, installed_at, version)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO maps (id, name, source_url, source_kind, workshop_id, installed_path, installed_at, version, checksum, checksum_kind)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
         )
         .bind(&entry.id)
         .bind(&entry.name)
         .bind(&entry.source_url)
-        .bind(entry.workshop_id.map(|v| v as i64))
-        .bind(entry.installed_path.to_string_lossy().to_string())
+        .bind(source_kind_str)
+        .bind(workshop_id)
+        .bind(&entry.installed_path)
         .bind(entry.installed_at.to_rfc3339())
         .bind(&entry.version)
+        .bind(&entry.checksum)
+        .bind(&entry.checksum_kind)
         .execute(&self.pool)
         .await?;
         
@@ -124,20 +220,35 @@ impl Registry for SqliteRegistry {
     }
     
     async fn update_map(&self, entry: MapEntry) -> anyhow::Result<()> {
+        let source_kind_str = match entry.source_kind {
+            SourceKind::Workshop => "workshop",
+            SourceKind::Other => "other",
+        };
+        
+        // Ensure workshop_id is None if source_kind is not Workshop
+        let workshop_id = if entry.source_kind == SourceKind::Workshop {
+            entry.workshop_id.map(|v| v as i64)
+        } else {
+            None
+        };
+        
         sqlx::query(
             r#"
             UPDATE maps
-            SET name = ?2, source_url = ?3, workshop_id = ?4, installed_path = ?5, installed_at = ?6, version = ?7
+            SET name = ?2, source_url = ?3, source_kind = ?4, workshop_id = ?5, installed_path = ?6, installed_at = ?7, version = ?8, checksum = ?9, checksum_kind = ?10
             WHERE id = ?1
             "#,
         )
         .bind(&entry.id)
         .bind(&entry.name)
         .bind(&entry.source_url)
-        .bind(entry.workshop_id.map(|v| v as i64))
-        .bind(entry.installed_path.to_string_lossy().to_string())
+        .bind(source_kind_str)
+        .bind(workshop_id)
+        .bind(&entry.installed_path)
         .bind(entry.installed_at.to_rfc3339())
         .bind(&entry.version)
+        .bind(&entry.checksum)
+        .bind(&entry.checksum_kind)
         .execute(&self.pool)
         .await?;
         
@@ -148,9 +259,10 @@ impl Registry for SqliteRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tempfile::NamedTempFile;
-    use chrono::Utc;
+use super::*;
+use crate::registry::models;
+use tempfile::NamedTempFile;
+use chrono::Utc;
 
     async fn setup_test_registry() -> SqliteRegistry {
         let temp_file = NamedTempFile::new().unwrap();
@@ -163,10 +275,13 @@ mod tests {
             id: id.to_string(),
             name: "Test Map".to_string(),
             source_url: "https://example.com/map.zip".to_string(),
+            source_kind: models::SourceKind::Workshop,
             workshop_id: Some(123456789),
-            installed_path: PathBuf::from("/test/path"),
+            installed_path: "test_map.vpk".to_string(),
             installed_at: Utc::now(),
             version: Some("1.0.0".to_string()),
+            checksum: Some("abc123def456".to_string()),
+            checksum_kind: Some("md5".to_string()),
         }
     }
 
@@ -201,10 +316,13 @@ mod tests {
             id: "test-id-2".to_string(),
             name: "Test Map 2".to_string(),
             source_url: "https://example.com/map2.zip".to_string(),
+            source_kind: models::SourceKind::Other,
             workshop_id: None,
-            installed_path: PathBuf::from("/test/path2"),
+            installed_path: "test_map2.vpk".to_string(),
             installed_at: Utc::now(),
             version: None,
+            checksum: None,
+            checksum_kind: None,
         };
         
         registry.add_map(entry.clone()).await.unwrap();
@@ -275,10 +393,13 @@ mod tests {
             id: "test-id-7".to_string(),
             name: "Test Map 7".to_string(),
             source_url: "https://example.com/map7.zip".to_string(),
+            source_kind: models::SourceKind::Other,
             workshop_id: None,
-            installed_path: PathBuf::from("/test/path7"),
+            installed_path: "test_map7.vpk".to_string(),
             installed_at: Utc::now(),
             version: None,
+            checksum: None,
+            checksum_kind: None,
         };
         
         registry.add_map(entry1).await.unwrap();
@@ -343,17 +464,20 @@ mod tests {
             id: "test-id-11".to_string(),
             name: "Test Map".to_string(),
             source_url: "https://example.com/map.zip".to_string(),
+            source_kind: models::SourceKind::Other,
             workshop_id: None,
-            installed_path: PathBuf::from(&long_path),
+            installed_path: long_path.clone(),
             installed_at: Utc::now(),
             version: None,
+            checksum: None,
+            checksum_kind: None,
         };
         
         registry.add_map(entry.clone()).await.unwrap();
         
         let retrieved = registry.get_map("test-id-11").await.unwrap();
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().installed_path, PathBuf::from(&long_path));
+        assert_eq!(retrieved.unwrap().installed_path, long_path);
     }
 }
 

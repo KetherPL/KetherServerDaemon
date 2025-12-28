@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
                                     if let Some(workshop_id) = map_entry.workshop_id {
                                         // Install from workshop ID
                                         if let Err(e) = installer_sync
-                                            .install_from_workshop_id(workshop_id)
+                                            .install_from_workshop_id(workshop_id, None)
                                             .await
                                         {
                                             error!(error = %e, map_id = %update.map_id, workshop_id, "Failed to install workshop map");

@@ -57,6 +57,7 @@ regex = "1.10"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 tempfile = "3.10"
 futures-util = "0.3"
+md5 = "0.7"
 
 # Steam Workshop integration
 steam-vent = "0.4.2"
