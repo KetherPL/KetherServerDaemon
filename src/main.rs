@@ -7,6 +7,7 @@ mod logging;
 mod map_installer;
 mod registry;
 mod sync;
+mod utils;
 mod watcher;
 
 #[cfg(test)]

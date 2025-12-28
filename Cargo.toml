@@ -14,7 +14,7 @@ sourcepak = { version = "0.3.0", features = ["mem-map"] }
 tokio = { version = "1.40", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 
 # HTTP server and WebSocket
 axum = { version = "0.7", features = ["ws", "json"] }

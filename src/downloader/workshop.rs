@@ -20,7 +20,7 @@ pub struct WorkshopDownloader {
 impl WorkshopDownloader {
     pub fn new(temp_dir: PathBuf) -> anyhow::Result<Self> {
         Ok(Self {
-            client: HttpClient::new()?,
+            client: HttpClient::new(100 * 1024 * 1024)?, // Default 100MB, should be passed from config
             temp_dir,
             steam_connection: Arc::new(OnceCell::new()),
         })

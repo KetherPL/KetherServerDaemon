@@ -6,10 +6,11 @@ use tracing::{info, warn};
 pub struct HttpClient {
     client: Client,
     max_retries: u32,
+    max_download_size: u64,
 }
 
 impl HttpClient {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(max_download_size: u64) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(300)) // 5 minute timeout for large downloads
             .user_agent("KetherServerDaemon/0.0.1")
@@ -18,6 +19,7 @@ impl HttpClient {
         Ok(Self {
             client,
             max_retries: 3,
+            max_download_size,
         })
     }
     
@@ -59,10 +61,43 @@ impl HttpClient {
         let response = self.client.get(url).send().await?;
         response.error_for_status_ref()?;
         
-        let content = response.bytes().await?;
-        tokio::fs::write(output_path, content).await?;
+        // Check Content-Length header if available
+        if let Some(content_length) = response.content_length() {
+            if content_length > self.max_download_size {
+                return Err(anyhow::anyhow!(
+                    "File size {} exceeds maximum download size {} bytes",
+                    content_length,
+                    self.max_download_size
+                ));
+            }
+        }
         
-        info!(url = %url, path = %output_path.display(), "Download completed");
+        // Stream download to check size during transfer
+        use tokio::io::AsyncWriteExt;
+        use futures_util::StreamExt;
+        
+        let mut stream = response.bytes_stream();
+        let mut downloaded: u64 = 0;
+        let mut file = tokio::fs::File::create(output_path).await?;
+        
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            downloaded += chunk.len() as u64;
+            
+            if downloaded > self.max_download_size {
+                // Try to clean up partial file
+                let _ = tokio::fs::remove_file(output_path).await;
+                return Err(anyhow::anyhow!(
+                    "Download size {} exceeds maximum download size {} bytes",
+                    downloaded,
+                    self.max_download_size
+                ));
+            }
+            
+            file.write_all(&chunk).await?;
+        }
+        
+        info!(url = %url, path = %output_path.display(), size = downloaded, "Download completed");
         Ok(())
     }
     
@@ -73,7 +108,7 @@ impl HttpClient {
 
 impl Default for HttpClient {
     fn default() -> Self {
-        Self::new().expect("Failed to create HTTP client")
+        Self::new(100 * 1024 * 1024).expect("Failed to create HTTP client") // 100MB default
     }
 }
 
@@ -92,7 +127,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_success() {
         let (mut server, base_url) = setup_mock_server().await;
-        let client = HttpClient::new().unwrap();
+        let client = HttpClient::new(100 * 1024 * 1024).unwrap();
         
         let mock = server.mock("GET", "/test.zip")
             .with_status(200)
@@ -117,7 +152,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_404_error() {
         let (mut server, base_url) = setup_mock_server().await;
-        let client = HttpClient::new().unwrap();
+        let client = HttpClient::new(100 * 1024 * 1024).unwrap();
         
         let mock = server.mock("GET", "/notfound.zip")
             .with_status(404)
@@ -139,7 +174,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_500_error() {
         let (mut server, base_url) = setup_mock_server().await;
-        let client = HttpClient::new().unwrap();
+        let client = HttpClient::new(100 * 1024 * 1024).unwrap();
         
         let mock = server.mock("GET", "/error.zip")
             .with_status(500)
@@ -161,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_retry_success_after_failure() {
         let (mut server, base_url) = setup_mock_server().await;
-        let client = HttpClient::new().unwrap();
+        let client = HttpClient::new(100 * 1024 * 1024).unwrap();
         
         // First two attempts fail, third succeeds
         let mock_fail1 = server.mock("GET", "/retry.zip")
@@ -201,7 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_invalid_url() {
-        let client = HttpClient::new().unwrap();
+        let client = HttpClient::new(100 * 1024 * 1024).unwrap();
         let temp_dir = TempDir::new().unwrap();
         let output_path = temp_dir.path().join("downloaded.zip");
         let invalid_url = "not-a-valid-url";
@@ -214,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_large_file() {
         let (mut server, base_url) = setup_mock_server().await;
-        let client = HttpClient::new().unwrap();
+        let client = HttpClient::new(100 * 1024 * 1024).unwrap();
         
         let large_content = "x".repeat(1024 * 1024); // 1MB
         let mock = server.mock("GET", "/large.zip")

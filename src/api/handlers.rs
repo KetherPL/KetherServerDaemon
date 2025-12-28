@@ -88,6 +88,21 @@ impl ApiHandlers {
     ) -> Result<Json<ApiResponse<String>>, StatusCode> {
         info!(url = %request.url, "Install map request received");
         
+        // Validate URL length
+        if request.url.len() > 2048 {
+            error!("URL too long: {} characters", request.url.len());
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        
+        // Validate map name length if provided
+        if let Some(ref name) = request.name {
+            if name.len() > 255 {
+                error!("Map name too long: {} characters", name.len());
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
+        
+        // URL validation is performed in parse_url and install_from_url
         match self.installer.install_from_url(request.url, request.name).await {
             Ok(map_entry) => {
                 info!(map_id = %map_entry.id, "Map installed successfully");

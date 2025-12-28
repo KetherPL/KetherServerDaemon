@@ -7,11 +7,17 @@ use tracing::info;
 use crate::extractor::traits::Extractor;
 use zip::ZipArchive;
 
-pub struct ZipExtractor;
+pub struct ZipExtractor {
+    max_extraction_size: u64,
+    max_file_count: u64,
+}
 
 impl ZipExtractor {
-    pub fn new() -> Self {
-        Self
+    pub fn new(max_extraction_size: u64, max_file_count: u64) -> Self {
+        Self {
+            max_extraction_size,
+            max_file_count,
+        }
     }
 }
 
@@ -25,20 +31,91 @@ impl Extractor for ZipExtractor {
         let archive_path_clone = archive_path.clone();
         let dest_clone = dest.clone();
         
+        // Canonicalize destination for path validation
+        let dest_canonical = std::fs::canonicalize(&dest_clone)
+            .or_else(|_| {
+                // If destination doesn't exist yet, create it and canonicalize parent
+                std::fs::create_dir_all(&dest_clone)?;
+                std::fs::canonicalize(&dest_clone)
+            })?;
+        
+        let max_extraction_size = self.max_extraction_size;
+        let max_file_count = self.max_file_count;
+        
         tokio::task::spawn_blocking(move || {
             let file = File::open(&archive_path_clone)?;
             let mut archive = ZipArchive::new(BufReader::new(file))?;
             
+            // Check total file count
+            if archive.len() > max_file_count as usize {
+                return Err(anyhow::anyhow!(
+                    "Archive contains {} files, exceeds maximum of {} files",
+                    archive.len(),
+                    max_file_count
+                ));
+            }
+            
+            let mut total_uncompressed_size: u64 = 0;
+            
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
                 let outpath = match file.enclosed_name() {
-                    Some(path) => dest_clone.join(path),
+                    Some(path) => {
+                        let joined = dest_clone.join(path);
+                        // Validate that the path doesn't escape the destination
+                        // by checking if canonicalized path starts with canonical destination
+                        match std::fs::canonicalize(&dest_clone) {
+                            Ok(dest_canon) => {
+                                match joined.canonicalize() {
+                                    Ok(out_canon) => {
+                                        if !out_canon.starts_with(&dest_canon) {
+                                            return Err(anyhow::anyhow!(
+                                                "ZIP entry {} would escape destination directory",
+                                                path.display()
+                                            ));
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // File doesn't exist yet, check components for ..
+                                        if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                                            return Err(anyhow::anyhow!(
+                                                "ZIP entry {} contains parent directory reference",
+                                                path.display()
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                // Fallback: check for parent dir components
+                                if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                                    return Err(anyhow::anyhow!(
+                                        "ZIP entry {} contains parent directory reference",
+                                        path.display()
+                                    ));
+                                }
+                            }
+                        }
+                        joined
+                    }
                     None => continue,
                 };
                 
                 if file.name().ends_with('/') {
                     std::fs::create_dir_all(&outpath)?;
                 } else {
+                    // Check uncompressed size before extracting
+                    let uncompressed_size = file.size();
+                    total_uncompressed_size += uncompressed_size;
+                    
+                    if total_uncompressed_size > max_extraction_size {
+                        return Err(anyhow::anyhow!(
+                            "Total uncompressed size {} exceeds maximum extraction size {} bytes (ZIP bomb protection)",
+                            total_uncompressed_size,
+                            max_extraction_size
+                        ));
+                    }
+                    
                     if let Some(p) = outpath.parent() {
                         if !p.exists() {
                             std::fs::create_dir_all(p)?;
@@ -68,7 +145,7 @@ impl Extractor for ZipExtractor {
 
 impl Default for ZipExtractor {
     fn default() -> Self {
-        Self::new()
+        Self::new(1024 * 1024 * 1024, 10000) // 1GB, 10000 files default
     }
 }
 
@@ -98,7 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_valid_zip() {
-        let extractor = ZipExtractor::new();
+        let extractor = ZipExtractor::new(1024 * 1024 * 1024, 10000);
         let (zip_path, _zip_temp) = create_test_zip(&[
             ("test.txt", b"Hello, World!"),
             ("readme.md", b"# Test Map"),
@@ -125,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_zip_with_nested_dirs() {
-        let extractor = ZipExtractor::new();
+        let extractor = ZipExtractor::new(1024 * 1024 * 1024, 10000);
         let (zip_path, _zip_temp) = create_test_zip(&[
             ("maps/test_map.bsp", b"BSP data"),
             ("materials/test.vmt", b"VMT data"),
@@ -148,7 +225,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_empty_zip() {
-        let extractor = ZipExtractor::new();
+        let extractor = ZipExtractor::new(1024 * 1024 * 1024, 10000);
         let (zip_path, _zip_temp) = create_test_zip(&[]);
         
         let dest_dir = TempDir::new().unwrap();
@@ -160,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_zip_nonexistent_file() {
-        let extractor = ZipExtractor::new();
+        let extractor = ZipExtractor::new(1024 * 1024 * 1024, 10000);
         let dest_dir = TempDir::new().unwrap();
         let dest_path = dest_dir.path().to_path_buf();
         let nonexistent_zip = PathBuf::from("/nonexistent/path/test.zip");
@@ -171,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_non_zip_file() {
-        let extractor = ZipExtractor::new();
+        let extractor = ZipExtractor::new(1024 * 1024 * 1024, 10000);
         let temp_dir = TempDir::new().unwrap();
         let fake_zip = temp_dir.path().join("fake.zip");
         std::fs::write(&fake_zip, b"This is not a ZIP file").unwrap();
@@ -185,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_vpk_not_supported() {
-        let extractor = ZipExtractor::new();
+        let extractor = ZipExtractor::new(1024 * 1024 * 1024, 10000);
         let temp_dir = TempDir::new().unwrap();
         let fake_vpk = temp_dir.path().join("test.vpk");
         std::fs::write(&fake_vpk, b"fake vpk").unwrap();
@@ -200,7 +277,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_vpk_metadata_not_supported() {
-        let extractor = ZipExtractor::new();
+        let extractor = ZipExtractor::new(1024 * 1024 * 1024, 10000);
         let temp_dir = TempDir::new().unwrap();
         let fake_vpk = temp_dir.path().join("test.vpk");
         std::fs::write(&fake_vpk, b"fake vpk").unwrap();
@@ -212,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_zip_with_special_characters() {
-        let extractor = ZipExtractor::new();
+        let extractor = ZipExtractor::new(1024 * 1024 * 1024, 10000);
         let (zip_path, _zip_temp) = create_test_zip(&[
             ("test file with spaces.txt", b"content with spaces"),
             ("file-with-dashes.txt", b"content with dashes"),

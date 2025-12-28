@@ -15,7 +15,7 @@ impl ZipDownloader {
         tokio::fs::create_dir_all(&temp_dir).await?;
         
         Ok(Self {
-            client: HttpClient::new()?,
+            client: HttpClient::new(100 * 1024 * 1024)?, // Default 100MB, should be passed from config
             temp_dir,
         })
     }
@@ -28,10 +28,21 @@ impl Downloader for ZipDownloader {
     }
     
     async fn download_zip(&self, url: &str) -> anyhow::Result<PathBuf> {
-        let filename = url
+        // Extract filename from URL and sanitize it
+        let raw_filename = url
             .split('/')
             .last()
             .unwrap_or("download.zip");
+        
+        // Sanitize filename to prevent path traversal
+        let filename = crate::utils::sanitize_filename(raw_filename);
+        
+        // If sanitization removed everything, use default
+        let filename = if filename.is_empty() {
+            "download.zip".to_string()
+        } else {
+            filename
+        };
         
         let output_path = self.temp_dir.join(format!("{}-{}", Uuid::new_v4(), filename));
         

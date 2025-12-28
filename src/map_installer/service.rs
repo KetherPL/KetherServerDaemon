@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-    use tracing::{info, warn};
+use anyhow::Context;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::downloader::{workshop::WorkshopDownloader, zip::ZipDownloader, traits::Downloader};
@@ -29,7 +30,7 @@ impl MapInstallationService {
             registry,
             workshop_downloader: WorkshopDownloader::new(temp_dir.clone())?,
             zip_downloader: ZipDownloader::new(temp_dir.clone()).await?,
-            zip_extractor: ZipExtractor::new(),
+            zip_extractor: ZipExtractor::new(1024 * 1024 * 1024, 10000), // Default limits, should be passed from config
             vpk_extractor: VpkExtractor::new(),
             addons_dir,
             temp_dir,
@@ -43,6 +44,18 @@ impl MapInstallationService {
         name: Option<String>,
     ) -> anyhow::Result<MapEntry> {
         info!(url = %url, "Starting map installation from URL");
+        
+        // If a name is provided, check if map with that name already exists
+        // This helps prevent race conditions in concurrent installations
+        if let Some(ref map_name) = name {
+            let sanitized_name = crate::utils::sanitize_map_name(map_name).ok();
+            if let Some(ref sanitized) = sanitized_name {
+                let maps = self.registry.list_maps().await?;
+                if maps.iter().any(|m| m.name == *sanitized) {
+                    return Err(anyhow::anyhow!("Map with name '{}' already installed", sanitized));
+                }
+            }
+        }
         
         let url_type = parse_url(&url)?;
         
@@ -137,18 +150,28 @@ impl MapInstallationService {
         // Extract metadata to get name and version
         let metadata = self.vpk_extractor.extract_vpk_metadata(vpk_path.clone()).await?;
         
-        let map_name = provided_name.unwrap_or_else(|| metadata.title.clone());
+        // Sanitize map name to prevent path traversal
+        let raw_map_name = provided_name.unwrap_or_else(|| metadata.title.clone());
+        let map_name = crate::utils::sanitize_map_name(&raw_map_name)
+            .context("Invalid map name provided")?;
+        
         let map_id = Uuid::new_v4().to_string();
         
         // Determine installation path (VPK files go to workshop directory)
         let workshop_dir = self.addons_dir.join("workshop");
         tokio::fs::create_dir_all(&workshop_dir).await?;
         
-        let vpk_filename = vpk_path.file_name()
+        // Sanitize VPK filename to prevent path traversal
+        let raw_vpk_filename = vpk_path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown.vpk");
+        let vpk_filename = crate::utils::sanitize_filename(raw_vpk_filename);
         
-        let install_path = workshop_dir.join(vpk_filename);
+        let install_path = workshop_dir.join(&vpk_filename);
+        
+        // Validate install path is within addons directory
+        crate::utils::validate_path_within_base_new(&install_path, &self.addons_dir)
+            .context("Install path is outside addons directory")?;
         
         // Copy VPK file to addons directory
         tokio::fs::copy(&vpk_path, &install_path).await?;
@@ -189,10 +212,15 @@ impl MapInstallationService {
         let extract_temp = self.temp_dir.join(format!("extract-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&extract_temp).await?;
         
-        self.zip_extractor.extract_zip(zip_path.clone(), extract_temp.clone()).await?;
+        // Extract ZIP with cleanup on error
+        if let Err(e) = self.zip_extractor.extract_zip(zip_path.clone(), extract_temp.clone()).await {
+            // Clean up temp directory on extraction error
+            let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+            return Err(e);
+        }
         
         // Try to detect map name from extracted contents
-        let map_name = if let Some(name) = provided_name {
+        let raw_map_name = if let Some(name) = provided_name {
             name
         } else if let Some(name) = self.detect_map_name_from_extracted(&extract_temp).await {
             name
@@ -203,6 +231,10 @@ impl MapInstallationService {
                 .to_string()
         };
         
+        // Sanitize map name to prevent path traversal
+        let map_name = crate::utils::sanitize_map_name(&raw_map_name)
+            .context("Invalid map name detected")?;
+        
         let map_id = Uuid::new_v4().to_string();
         
         // Determine installation path (extracted maps go to maps directory)
@@ -210,6 +242,10 @@ impl MapInstallationService {
         tokio::fs::create_dir_all(&maps_dir).await?;
         
         let map_install_dir = maps_dir.join(&map_name);
+        
+        // Validate install path is within addons directory
+        crate::utils::validate_path_within_base_new(&map_install_dir, &self.addons_dir)
+            .context("Install path is outside addons directory")?;
         
         // If directory exists, remove it first (or handle conflict)
         if map_install_dir.exists() {
@@ -224,12 +260,18 @@ impl MapInstallationService {
         // Move the map files to the installation directory
         if source_dir != extract_temp {
             // Copy from nested directory
-            copy_directory(source_dir, map_install_dir.clone()).await?;
+            if let Err(e) = copy_directory(source_dir, map_install_dir.clone()).await {
+                // Clean up temp directory on error
+                let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+                return Err(e);
+            }
         } else {
             // Move the entire extracted directory
-            tokio::fs::rename(&extract_temp, &map_install_dir).await?;
-            // Recreate temp dir for future use
-            tokio::fs::create_dir_all(&extract_temp).await?;
+            if let Err(e) = tokio::fs::rename(&extract_temp, &map_install_dir).await {
+                // Clean up temp directory on error
+                let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+                return Err(e).context("Failed to move extracted directory");
+            }
         }
         
         // Try to find VPK file in the extracted contents for metadata
@@ -252,12 +294,26 @@ impl MapInstallationService {
             version,
         };
         
-        // Register in database
-        self.registry.add_map(map_entry.clone()).await?;
+        // Register in database - check for race condition here too
+        if let Err(e) = self.registry.add_map(map_entry.clone()).await {
+            // If registration fails (e.g., duplicate ID), clean up installed files
+            if map_install_dir.exists() {
+                if map_install_dir.is_dir() {
+                    let _ = tokio::fs::remove_dir_all(&map_install_dir).await;
+                } else {
+                    let _ = tokio::fs::remove_file(&map_install_dir).await;
+                }
+            }
+            return Err(e);
+        }
         
-        // Clean up downloaded ZIP file
+        // Clean up downloaded ZIP file and temp directory
         if let Err(e) = tokio::fs::remove_file(&zip_path).await {
             warn!(error = %e, path = %zip_path.display(), "Failed to clean up downloaded ZIP");
+        }
+        // Clean up temp directory if it still exists (for nested copy case)
+        if extract_temp.exists() {
+            let _ = tokio::fs::remove_dir_all(&extract_temp).await;
         }
         
         Ok(map_entry)
@@ -475,15 +531,32 @@ impl MapInstallationService {
 }
 
 /// Copy directory recursively
+/// 
+/// Validates that all destination paths stay within the base destination directory
+/// to prevent path traversal attacks during recursive copying.
 fn copy_directory(src: PathBuf, dst: PathBuf) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
     Box::pin(async move {
         tokio::fs::create_dir_all(&dst).await?;
         
+        // Store canonical base destination for validation
+        let base_dst = dst.canonicalize()
+            .context("Failed to canonicalize destination base path")?;
+        
         let mut entries = tokio::fs::read_dir(&src).await?;
         while let Some(entry) = entries.next_entry().await? {
             let entry_path = entry.path();
+            
+            // Sanitize filename to prevent path traversal
             let file_name = entry.file_name();
-            let dst_path = dst.join(&file_name);
+            let sanitized_name = crate::utils::sanitize_filename(
+                file_name.to_str().unwrap_or("invalid")
+            );
+            
+            let dst_path = dst.join(&sanitized_name);
+            
+            // Validate destination path is within base destination
+            crate::utils::validate_path_within_base_new(&dst_path, &base_dst)
+                .context("Destination path would escape base directory")?;
             
             if entry.file_type().await?.is_dir() {
                 copy_directory(entry_path, dst_path).await?;
@@ -500,7 +573,6 @@ fn copy_directory(src: PathBuf, dst: PathBuf) -> std::pin::Pin<Box<dyn std::futu
 mod tests {
     use super::*;
     use crate::test_helpers;
-    use mockito::ServerGuard;
     use tempfile::TempDir;
     use zip::write::{FileOptions, ZipWriter};
     use zip::CompressionMethod;

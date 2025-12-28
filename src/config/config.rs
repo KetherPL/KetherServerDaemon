@@ -27,6 +27,30 @@ pub struct Config {
     
     /// Logging level (trace, debug, info, warn, error)
     pub log_level: String,
+    
+    /// Maximum download size in bytes (default: 100MB)
+    #[serde(default = "default_max_download_size")]
+    pub max_download_size_bytes: u64,
+    
+    /// Maximum extraction size in bytes (default: 1GB)
+    #[serde(default = "default_max_extraction_size")]
+    pub max_extraction_size_bytes: u64,
+    
+    /// Maximum number of files in an archive (default: 10000)
+    #[serde(default = "default_max_extraction_file_count")]
+    pub max_extraction_file_count: u64,
+}
+
+fn default_max_download_size() -> u64 {
+    100 * 1024 * 1024 // 100MB
+}
+
+fn default_max_extraction_size() -> u64 {
+    1024 * 1024 * 1024 // 1GB
+}
+
+fn default_max_extraction_file_count() -> u64 {
+    10000
 }
 
 impl Config {
@@ -65,6 +89,15 @@ impl Config {
         if let Ok(val) = std::env::var("KETHER_LOG_LEVEL") {
             config.log_level = val;
         }
+        if let Ok(val) = std::env::var("KETHER_MAX_DOWNLOAD_SIZE_BYTES") {
+            config.max_download_size_bytes = val.parse()?;
+        }
+        if let Ok(val) = std::env::var("KETHER_MAX_EXTRACTION_SIZE_BYTES") {
+            config.max_extraction_size_bytes = val.parse()?;
+        }
+        if let Ok(val) = std::env::var("KETHER_MAX_EXTRACTION_FILE_COUNT") {
+            config.max_extraction_file_count = val.parse()?;
+        }
         
         Ok(config)
     }
@@ -85,6 +118,9 @@ impl Default for Config {
             local_api_bind: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
             sync_interval_secs: 300, // 5 minutes
             log_level: String::from("info"),
+            max_download_size_bytes: default_max_download_size(),
+            max_extraction_size_bytes: default_max_extraction_size(),
+            max_extraction_file_count: default_max_extraction_file_count(),
         }
     }
 }

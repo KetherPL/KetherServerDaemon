@@ -24,6 +24,9 @@ pub fn create_test_config() -> Config {
         local_api_bind: SocketAddr::from_str("127.0.0.1:0").unwrap(), // Use port 0 to auto-assign
         sync_interval_secs: 60,
         log_level: "error".to_string(), // Reduce log noise in tests
+        max_download_size_bytes: 100 * 1024 * 1024, // 100MB
+        max_extraction_size_bytes: 1024 * 1024 * 1024, // 1GB
+        max_extraction_file_count: 10000,
     }
 }
 

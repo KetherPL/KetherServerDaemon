@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+use anyhow::Context;
 use regex::Regex;
 use url::Url;
 
@@ -9,6 +10,10 @@ pub enum UrlType {
 }
 
 pub fn parse_url(url_or_id: &str) -> anyhow::Result<UrlType> {
+    // Validate URL length first
+    if url_or_id.len() > 2048 {
+        return Err(anyhow::anyhow!("URL exceeds maximum length of 2048 characters"));
+    }
     // Try to parse as numeric workshop ID first
     if let Ok(workshop_id) = url_or_id.parse::<u64>() {
         // Check if it looks like a workshop ID (reasonable range)
@@ -38,7 +43,11 @@ pub fn parse_url(url_or_id: &str) -> anyhow::Result<UrlType> {
         }
         
         // Default to ZIP URL if it's a valid HTTP/HTTPS URL
+        // But validate it first to prevent SSRF attacks
         if parsed_url.scheme() == "http" || parsed_url.scheme() == "https" {
+            // Validate URL to prevent SSRF
+            crate::utils::validate_url(url_or_id)
+                .context("URL validation failed (possible SSRF attempt)")?;
             return Ok(UrlType::ZipUrl(url_or_id.to_string()));
         }
     }
