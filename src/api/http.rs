@@ -33,7 +33,6 @@ impl HttpServer {
         let handlers = Arc::new(self.handlers);
         
         let app = Router::new()
-            .route("/health", get(health_handler))
             .route("/api/maps", get(list_maps_handler))
             .route("/api/maps/:id", get(get_map_handler))
             .route("/api/maps/install", post(install_map_handler))
@@ -47,10 +46,6 @@ impl HttpServer {
         
         Ok(())
     }
-}
-
-async fn health_handler() -> Json<ApiResponse<&'static str>> {
-    ApiHandlers::health().await
 }
 
 async fn list_maps_handler(

@@ -52,10 +52,6 @@ impl ApiHandlers {
 }
 
 impl ApiHandlers {
-    pub async fn health() -> Json<ApiResponse<&'static str>> {
-        Json(ApiResponse::success("ok"))
-    }
-    
     pub async fn list_maps(
         &self,
     ) -> Result<Json<ApiResponse<Vec<MapEntry>>>, StatusCode> {

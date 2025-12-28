@@ -176,10 +176,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
     
-    // Start WebSocket server (integrated with HTTP)
-    // Note: For simplicity, WebSocket is handled via HTTP server routes
-    // If needed, it can be separated into a different port
-    
     info!("All services started. Waiting for shutdown signal...");
     
     // Wait for shutdown signal
