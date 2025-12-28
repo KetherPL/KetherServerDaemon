@@ -6,13 +6,14 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum SourceKind {
     Workshop,
+    SirPlease,
     Other,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MapEntry {
-    /// Unique identifier for the map
-    pub id: String,
+    /// Unique identifier for the map (auto-incrementing integer)
+    pub id: u64,
     
     /// Display name of the map
     pub name: String,
@@ -44,7 +45,7 @@ pub struct MapEntry {
 
 impl MapEntry {
     pub fn new(
-        id: String,
+        id: u64,
         name: String,
         source_url: String,
         installed_path: String,
@@ -71,13 +72,13 @@ mod tests {
     #[test]
     fn test_map_entry_new() {
         let entry = MapEntry::new(
-            "test-id".to_string(),
+            1,
             "Test Map".to_string(),
             "https://example.com/map.zip".to_string(),
             "map.vpk".to_string(),
         );
 
-        assert_eq!(entry.id, "test-id");
+        assert_eq!(entry.id, 1);
         assert_eq!(entry.name, "Test Map");
         assert_eq!(entry.source_url, "https://example.com/map.zip");
         assert_eq!(entry.installed_path, "map.vpk");
@@ -92,7 +93,7 @@ mod tests {
     #[test]
     fn test_map_entry_serialize_json() {
         let entry = MapEntry {
-            id: "test-id".to_string(),
+            id: 42,
             name: "Test Map".to_string(),
             source_url: "https://example.com/map.zip".to_string(),
             source_kind: SourceKind::Workshop,
@@ -105,7 +106,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains("\"id\":\"test-id\""));
+        assert!(json.contains("\"id\":42"));
         assert!(json.contains("\"name\":\"Test Map\""));
         assert!(json.contains("\"source_url\":\"https://example.com/map.zip\""));
         assert!(json.contains("\"source_kind\":\"workshop\""));
@@ -119,7 +120,7 @@ mod tests {
     #[test]
     fn test_map_entry_deserialize_json() {
         let json = r#"{
-            "id": "test-id",
+            "id": 42,
             "name": "Test Map",
             "source_url": "https://example.com/map.zip",
             "source_kind": "workshop",
@@ -132,7 +133,7 @@ mod tests {
         }"#;
 
         let entry: MapEntry = serde_json::from_str(json).unwrap();
-        assert_eq!(entry.id, "test-id");
+        assert_eq!(entry.id, 42);
         assert_eq!(entry.name, "Test Map");
         assert_eq!(entry.source_url, "https://example.com/map.zip");
         assert_eq!(entry.source_kind, SourceKind::Workshop);
@@ -146,7 +147,7 @@ mod tests {
     #[test]
     fn test_map_entry_serialize_deserialize_roundtrip() {
         let original = MapEntry {
-            id: "test-id".to_string(),
+            id: 123,
             name: "Test Map".to_string(),
             source_url: "https://example.com/map.zip".to_string(),
             source_kind: SourceKind::Other,
@@ -175,7 +176,7 @@ mod tests {
     #[test]
     fn test_map_entry_with_optional_fields_none() {
         let entry = MapEntry {
-            id: "test-id".to_string(),
+            id: 1,
             name: "Test Map".to_string(),
             source_url: "https://example.com/map.zip".to_string(),
             source_kind: SourceKind::Other,

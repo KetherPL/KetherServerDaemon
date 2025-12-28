@@ -64,7 +64,7 @@ async fn get_map_handler(
 async fn install_map_handler(
     axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
     Json(request): Json<InstallMapRequest>,
-) -> Result<Json<ApiResponse<String>>, StatusCode> {
+) -> Result<Json<ApiResponse<u64>>, StatusCode> {
     handlers.install_map(Json(request)).await
 }
 

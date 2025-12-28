@@ -74,7 +74,13 @@ impl ApiHandlers {
         &self,
         Path(id): Path<String>,
     ) -> Result<Json<ApiResponse<MapEntry>>, StatusCode> {
-        match self.registry.get_map(&id).await {
+        let map_id = id.parse::<u64>()
+            .map_err(|_| {
+                error!(id = %id, "Invalid map ID format (expected integer)");
+                StatusCode::BAD_REQUEST
+            })?;
+        
+        match self.registry.get_map(map_id).await {
             Ok(Some(map)) => Ok(Json(ApiResponse::success(map))),
             Ok(None) => Err(StatusCode::NOT_FOUND),
             Err(e) => {
@@ -87,7 +93,7 @@ impl ApiHandlers {
     pub async fn install_map(
         &self,
         Json(request): Json<InstallMapRequest>,
-    ) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    ) -> Result<Json<ApiResponse<u64>>, StatusCode> {
         // Validate that exactly one of url or workshop_id is provided
         match (request.url.as_ref(), request.workshop_id) {
             (Some(_), Some(_)) => {
@@ -157,9 +163,15 @@ impl ApiHandlers {
         &self,
         Path(id): Path<String>,
     ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-        match self.installer.uninstall_map(&id).await {
+        let map_id = id.parse::<u64>()
+            .map_err(|_| {
+                error!(id = %id, "Invalid map ID format (expected integer)");
+                StatusCode::BAD_REQUEST
+            })?;
+        
+        match self.installer.uninstall_map(map_id).await {
             Ok(()) => {
-                info!(map_id = %id, "Map uninstalled");
+                info!(map_id = map_id, "Map uninstalled");
                 Ok(Json(ApiResponse::success(())))
             }
             Err(e) => {

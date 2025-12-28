@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use anyhow::Context;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 use crate::downloader::{workshop::WorkshopDownloader, zip::ZipDownloader, traits::Downloader};
 use crate::extractor::{zip::ZipExtractor, traits::Extractor, vpk::VpkExtractor};
@@ -86,8 +85,8 @@ impl MapInstallationService {
         // Download workshop item
         let downloaded_path = self.workshop_downloader.download_workshop(workshop_id).await?;
         
-        // Determine file type and install
-        let map_entry = self.install_downloaded_file(downloaded_path, SourceKind::Workshop, Some(workshop_id), name).await?;
+        // Determine file type and install (workshop maps have empty source_url)
+        let map_entry = self.install_downloaded_file(downloaded_path, SourceKind::Workshop, Some(workshop_id), name, None).await?;
         
         info!(map_id = %map_entry.id, workshop_id, "Workshop map installed successfully");
         Ok(map_entry)
@@ -101,11 +100,18 @@ impl MapInstallationService {
     ) -> anyhow::Result<MapEntry> {
         info!(url = %url, "Installing map from ZIP URL");
         
+        // Detect source kind based on URL
+        let source_kind = if url.to_lowercase().contains("sirplease.vercel.app") {
+            SourceKind::SirPlease
+        } else {
+            SourceKind::Other
+        };
+        
         // Download ZIP file
         let downloaded_path = self.zip_downloader.download_zip(url).await?;
         
         // Install the downloaded file
-        self.install_downloaded_file(downloaded_path, SourceKind::Other, None, name).await
+        self.install_downloaded_file(downloaded_path, source_kind, None, name, Some(url.to_string())).await
     }
     
     /// Install a downloaded file (ZIP or VPK)
@@ -115,6 +121,7 @@ impl MapInstallationService {
         source_kind: SourceKind,
         workshop_id: Option<u64>,
         provided_name: Option<String>,
+        source_url: Option<String>,
     ) -> anyhow::Result<MapEntry> {
         let file_ext = file_path.extension()
             .and_then(|e| e.to_str())
@@ -122,14 +129,14 @@ impl MapInstallationService {
             .to_lowercase();
         
         match file_ext.as_str() {
-            "vpk" => self.install_vpk_file(file_path, source_kind, workshop_id, provided_name).await,
-            "zip" => self.install_zip_file(file_path, source_kind, workshop_id, provided_name).await,
+            "vpk" => self.install_vpk_file(file_path, source_kind, workshop_id, provided_name, source_url).await,
+            "zip" => self.install_zip_file(file_path, source_kind, workshop_id, provided_name, source_url).await,
             _ => {
                 // Try to infer from content
                 if file_path.extension().is_none() || file_ext.is_empty() {
                     // Check if it's a VPK by trying to read it
                     if self.is_vpk_file(&file_path).await? {
-                        return self.install_vpk_file(file_path, source_kind, workshop_id, provided_name).await;
+                        return self.install_vpk_file(file_path, source_kind, workshop_id, provided_name, source_url).await;
                     }
                 }
                 Err(anyhow::anyhow!("Unsupported file type: {}", file_ext))
@@ -153,6 +160,7 @@ impl MapInstallationService {
         source_kind: SourceKind,
         workshop_id: Option<u64>,
         provided_name: Option<String>,
+        source_url: Option<String>,
     ) -> anyhow::Result<MapEntry> {
         info!(path = %vpk_path.display(), "Installing VPK file");
         
@@ -163,8 +171,6 @@ impl MapInstallationService {
         let raw_map_name = provided_name.unwrap_or_else(|| metadata.title.clone());
         let map_name = crate::utils::sanitize_map_name(&raw_map_name)
             .context("Invalid map name provided")?;
-        
-        let map_id = Uuid::new_v4().to_string();
         
         // Sanitize VPK filename to prevent path traversal
         let raw_vpk_filename = vpk_path.file_name()
@@ -194,20 +200,20 @@ impl MapInstallationService {
         let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
         
         // Determine source URL
-        let source_url = match (source_kind, workshop_id) {
-            (SourceKind::Workshop, Some(ws_id)) => format!("workshop:{}", ws_id),
-            _ => format!("file:{}", vpk_filename),
+        let source_url = match source_kind {
+            SourceKind::Workshop => "".to_string(), // Empty for workshop maps
+            _ => source_url.unwrap_or_else(|| format!("file:{}", vpk_filename)),
         };
         
         // Ensure workshop_id is only set when source_kind is Workshop
         let workshop_id = match source_kind {
             SourceKind::Workshop => workshop_id,
-            SourceKind::Other => None,
+            SourceKind::SirPlease | SourceKind::Other => None,
         };
         
-        // Create map entry with relative path
-        let map_entry = MapEntry {
-            id: map_id.clone(),
+        // Create map entry with relative path (ID will be assigned by database)
+        let mut map_entry = MapEntry {
+            id: 0, // Temporary, will be replaced by database-assigned ID
             name: map_name,
             source_url,
             source_kind,
@@ -219,12 +225,18 @@ impl MapInstallationService {
             checksum_kind,
         };
         
-        // Register in database
-        if let Err(e) = self.registry.add_map(map_entry.clone()).await {
-            // Clean up installed file on error
-            let _ = tokio::fs::remove_file(&install_path).await;
-            return Err(e);
-        }
+        // Register in database and get assigned ID
+        let assigned_id = match self.registry.add_map(map_entry.clone()).await {
+            Ok(id) => id,
+            Err(e) => {
+                // Clean up installed file on error
+                let _ = tokio::fs::remove_file(&install_path).await;
+                return Err(e);
+            }
+        };
+        
+        // Update map entry with assigned ID
+        map_entry.id = assigned_id;
         
         // Clean up downloaded file
         if let Err(e) = tokio::fs::remove_file(&vpk_path).await {
@@ -241,6 +253,7 @@ impl MapInstallationService {
         source_kind: SourceKind,
         workshop_id: Option<u64>,
         provided_name: Option<String>,
+        source_url: Option<String>,
     ) -> anyhow::Result<MapEntry> {
         info!(path = %zip_path.display(), "Installing ZIP file");
         
@@ -250,7 +263,7 @@ impl MapInstallationService {
         }
         
         // Extract ZIP to temporary directory
-        let extract_temp = self.temp_dir.join(format!("extract-{}", Uuid::new_v4()));
+        let extract_temp = self.temp_dir.join(format!("extract-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         tokio::fs::create_dir_all(&extract_temp).await?;
         
         // Extract ZIP with cleanup on error
@@ -282,8 +295,6 @@ impl MapInstallationService {
         let map_name = crate::utils::sanitize_map_name(&raw_map_name)
             .context("Invalid map name detected")?;
         
-        let map_id = Uuid::new_v4().to_string();
-        
         // Get VPK filename
         let raw_vpk_filename = source_vpk_path.file_name()
             .and_then(|n| n.to_str())
@@ -314,18 +325,26 @@ impl MapInstallationService {
         let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
         
         // Determine source URL
-        let source_url = zip_path.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| format!("zip:{}", n))
-            .unwrap_or_else(|| "zip:unknown".to_string());
+        let source_url = source_url.unwrap_or_else(|| {
+            zip_path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| format!("zip:{}", n))
+                .unwrap_or_else(|| "zip:unknown".to_string())
+        });
         
-        // Create map entry with relative path
-        let map_entry = MapEntry {
-            id: map_id.clone(),
+        // Ensure workshop_id is only set when source_kind is Workshop
+        let workshop_id = match source_kind {
+            SourceKind::Workshop => workshop_id,
+            SourceKind::SirPlease | SourceKind::Other => None,
+        };
+        
+        // Create map entry with relative path (ID will be assigned by database)
+        let mut map_entry = MapEntry {
+            id: 0, // Temporary, will be replaced by database-assigned ID
             name: map_name,
             source_url,
             source_kind,
-            workshop_id: None, // ZIP files from URLs are not workshop items
+            workshop_id,
             installed_path: vpk_filename.clone(), // Store relative path (just filename)
             installed_at: chrono::Utc::now(),
             version: Some(metadata.version),
@@ -333,12 +352,18 @@ impl MapInstallationService {
             checksum_kind,
         };
         
-        // Register in database
-        if let Err(e) = self.registry.add_map(map_entry.clone()).await {
-            // Clean up installed file on error
-            let _ = tokio::fs::remove_file(&install_path).await;
-            return Err(e);
-        }
+        // Register in database and get assigned ID
+        let assigned_id = match self.registry.add_map(map_entry.clone()).await {
+            Ok(id) => id,
+            Err(e) => {
+                // Clean up installed file on error
+                let _ = tokio::fs::remove_file(&install_path).await;
+                return Err(e);
+            }
+        };
+        
+        // Update map entry with assigned ID
+        map_entry.id = assigned_id;
         
         // Clean up downloaded ZIP file and temp directory
         if let Err(e) = tokio::fs::remove_file(&zip_path).await {
@@ -507,8 +532,8 @@ impl MapInstallationService {
     }
     
     /// Uninstall a map
-    pub async fn uninstall_map(&self, map_id: &str) -> anyhow::Result<()> {
-        info!(map_id, "Uninstalling map");
+    pub async fn uninstall_map(&self, map_id: u64) -> anyhow::Result<()> {
+        info!(map_id = map_id, "Uninstalling map");
         
         // Get map entry from registry
         let map_entry = self.registry.get_map(map_id).await?
@@ -536,7 +561,7 @@ impl MapInstallationService {
         // Remove from registry
         self.registry.remove_map(map_id).await?;
         
-        info!(map_id, "Map uninstalled successfully");
+        info!(map_id = map_id, "Map uninstalled successfully");
         Ok(())
     }
     
@@ -564,10 +589,9 @@ impl MapInstallationService {
                 let checksum = crate::utils::calculate_file_md5(&path).await.ok();
                 let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
                 
-                // Create new entry
-                let map_id = Uuid::new_v4().to_string();
-                let map_entry = MapEntry {
-                    id: map_id.clone(),
+                // Create new entry (ID will be assigned by database)
+                let mut map_entry = MapEntry {
+                    id: 0, // Temporary, will be replaced by database-assigned ID
                     name: metadata.title,
                     source_url: format!("detected:{}", path.display()),
                     source_kind: SourceKind::Other,
@@ -579,7 +603,9 @@ impl MapInstallationService {
                     checksum_kind,
                 };
                 
-                self.registry.add_map(map_entry.clone()).await?;
+                // Register in database and get assigned ID
+                let assigned_id = self.registry.add_map(map_entry.clone()).await?;
+                map_entry.id = assigned_id;
                 return Ok(Some(map_entry));
             }
         }
@@ -686,8 +712,8 @@ mod tests {
         let (service, _addons_dir, registry) = setup_test_service().await;
         
         // Add a test map entry
-        let map_entry = MapEntry {
-            id: "test-map-id".to_string(),
+        let mut map_entry = MapEntry {
+            id: 0, // Will be assigned by database
             name: "Test Map".to_string(),
             source_url: "https://example.com/map.zip".to_string(),
             source_kind: SourceKind::Other,
@@ -698,14 +724,15 @@ mod tests {
             checksum: None,
             checksum_kind: None,
         };
-        registry.add_map(map_entry.clone()).await.unwrap();
+        let assigned_id = registry.add_map(map_entry.clone()).await.unwrap();
+        map_entry.id = assigned_id;
         
         // Uninstall should succeed even if path doesn't exist
-        let result = service.uninstall_map("test-map-id").await;
+        let result = service.uninstall_map(assigned_id).await;
         assert!(result.is_ok());
         
         // Verify map was removed from registry
-        let retrieved = registry.get_map("test-map-id").await.unwrap();
+        let retrieved = registry.get_map(assigned_id).await.unwrap();
         assert!(retrieved.is_none());
     }
 
@@ -714,7 +741,7 @@ mod tests {
         let (service, _addons_dir, _registry) = setup_test_service().await;
         
         // Uninstall non-existent map should not error
-        let result = service.uninstall_map("non-existent-id").await;
+        let result = service.uninstall_map(99999).await;
         assert!(result.is_ok());
     }
 
@@ -769,11 +796,11 @@ mod tests {
             assert_eq!(map_entry.name, "Test Map");
             assert_eq!(map_entry.source_kind, SourceKind::Other);
             assert!(map_entry.installed_path.ends_with(".vpk"));
+            
+            // Verify map is in registry
+            let retrieved = registry.get_map(map_entry.id).await.unwrap();
+            assert!(retrieved.is_some());
         }
-        
-        // Verify map is in registry
-        let retrieved = registry.get_map(&map_entry.id).await.unwrap();
-        assert!(retrieved.is_some());
         
         mock.assert_async().await;
     }

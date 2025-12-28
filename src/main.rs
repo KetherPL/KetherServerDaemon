@@ -136,8 +136,15 @@ async fn main() -> anyhow::Result<()> {
                             }
                             "uninstall" => {
                                 info!(map_id = %update.map_id, "Backend requested map uninstallation");
-                                if let Err(e) = installer_sync.uninstall_map(&update.map_id).await {
-                                    error!(error = %e, map_id = %update.map_id, "Failed to uninstall map");
+                                match update.map_id.parse::<u64>() {
+                                    Ok(map_id) => {
+                                        if let Err(e) = installer_sync.uninstall_map(map_id).await {
+                                            error!(error = %e, map_id = %update.map_id, "Failed to uninstall map");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(error = %e, map_id = %update.map_id, "Invalid map ID format from backend");
+                                    }
                                 }
                             }
                             _ => {

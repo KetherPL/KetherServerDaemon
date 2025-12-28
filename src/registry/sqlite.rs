@@ -22,83 +22,30 @@ impl SqliteRegistry {
     
     async fn init_schema(&self) -> anyhow::Result<()> {
         // Create table if it doesn't exist
+        // Note: This will fail on existing databases with TEXT id - that's expected (fresh database required)
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS maps (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 source_url TEXT NOT NULL,
                 workshop_id INTEGER,
                 installed_path TEXT NOT NULL,
                 installed_at TEXT NOT NULL,
-                version TEXT
+                version TEXT,
+                source_kind TEXT NOT NULL DEFAULT 'other',
+                checksum TEXT,
+                checksum_kind TEXT
             )
             "#,
         )
         .execute(&self.pool)
         .await?;
         
-        // Add new columns if they don't exist (migration)
-        self.migrate_schema().await?;
-        
         info!("Initialized SQLite registry schema");
         Ok(())
     }
     
-    async fn migrate_schema(&self) -> anyhow::Result<()> {
-        // Check if source_kind column exists by trying to query it
-        let result = sqlx::query("SELECT source_kind FROM maps LIMIT 1")
-            .fetch_optional(&self.pool)
-            .await;
-        
-        if result.is_err() {
-            // Column doesn't exist, need to add it
-            info!("Migrating database schema: adding new columns");
-            
-            // Add source_kind column with default value
-            sqlx::query(
-                r#"
-                ALTER TABLE maps ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'other'
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-            
-            // Update existing records: if workshop_id is not null, set source_kind to 'workshop'
-            sqlx::query(
-                r#"
-                UPDATE maps SET source_kind = 'workshop' WHERE workshop_id IS NOT NULL
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-            
-            // Add checksum column (nullable)
-            sqlx::query(
-                r#"
-                ALTER TABLE maps ADD COLUMN checksum TEXT
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-            
-            // Add checksum_kind column (nullable)
-            sqlx::query(
-                r#"
-                ALTER TABLE maps ADD COLUMN checksum_kind TEXT
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-            
-            // Note: For existing records with absolute paths, we can't automatically
-            // convert them to relative paths without knowing the addons_dir.
-            // This will be handled at read time or require manual migration.
-            warn!("Database migrated. Existing absolute paths in installed_path may need manual conversion to relative paths.");
-        }
-        
-        Ok(())
-    }
     
     fn map_entry_from_row(&self, row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<MapEntry> {
         use chrono::DateTime;
@@ -107,6 +54,7 @@ impl SqliteRegistry {
             .unwrap_or_else(|_| "other".to_string()); // Default to "other" for old records
         let source_kind = match source_kind_str.as_str() {
             "workshop" => SourceKind::Workshop,
+            "sirplease" => SourceKind::SirPlease,
             "other" => SourceKind::Other,
             _ => {
                 warn!(source_kind = %source_kind_str, "Unknown source_kind, defaulting to 'other'");
@@ -123,7 +71,7 @@ impl SqliteRegistry {
         };
         
         Ok(MapEntry {
-            id: row.get::<String, _>("id"),
+            id: row.get::<i64, _>("id") as u64,
             name: row.get::<String, _>("name"),
             source_url: row.get::<String, _>("source_url"),
             source_kind,
@@ -140,9 +88,10 @@ impl SqliteRegistry {
 
 #[async_trait]
 impl Registry for SqliteRegistry {
-    async fn add_map(&self, entry: MapEntry) -> anyhow::Result<()> {
+    async fn add_map(&self, entry: MapEntry) -> anyhow::Result<u64> {
         let source_kind_str = match entry.source_kind {
             SourceKind::Workshop => "workshop",
+            SourceKind::SirPlease => "sirplease",
             SourceKind::Other => "other",
         };
         
@@ -153,13 +102,13 @@ impl Registry for SqliteRegistry {
             None
         };
         
-        sqlx::query(
+        // Insert without ID (database will assign auto-increment ID)
+        let result = sqlx::query(
             r#"
-            INSERT INTO maps (id, name, source_url, source_kind, workshop_id, installed_path, installed_at, version, checksum, checksum_kind)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            INSERT INTO maps (name, source_url, source_kind, workshop_id, installed_path, installed_at, version, checksum, checksum_kind)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
         )
-        .bind(&entry.id)
         .bind(&entry.name)
         .bind(&entry.source_url)
         .bind(source_kind_str)
@@ -172,26 +121,29 @@ impl Registry for SqliteRegistry {
         .execute(&self.pool)
         .await?;
         
-        info!(map_id = %entry.id, "Added map to registry");
-        Ok(())
+        // Get the assigned ID from last_insert_rowid
+        let assigned_id = result.last_insert_rowid() as u64;
+        
+        info!(map_id = assigned_id, "Added map to registry");
+        Ok(assigned_id)
     }
     
-    async fn remove_map(&self, id: &str) -> anyhow::Result<()> {
+    async fn remove_map(&self, id: u64) -> anyhow::Result<()> {
         let result = sqlx::query("DELETE FROM maps WHERE id = ?1")
-            .bind(id)
+            .bind(id as i64)
             .execute(&self.pool)
             .await?;
         
         if result.rows_affected() > 0 {
-            info!(map_id = %id, "Removed map from registry");
+            info!(map_id = id, "Removed map from registry");
         }
         
         Ok(())
     }
     
-    async fn get_map(&self, id: &str) -> anyhow::Result<Option<MapEntry>> {
+    async fn get_map(&self, id: u64) -> anyhow::Result<Option<MapEntry>> {
         let row = sqlx::query("SELECT * FROM maps WHERE id = ?1")
-            .bind(id)
+            .bind(id as i64)
             .fetch_optional(&self.pool)
             .await?;
         
@@ -222,6 +174,7 @@ impl Registry for SqliteRegistry {
     async fn update_map(&self, entry: MapEntry) -> anyhow::Result<()> {
         let source_kind_str = match entry.source_kind {
             SourceKind::Workshop => "workshop",
+            SourceKind::SirPlease => "sirplease",
             SourceKind::Other => "other",
         };
         
@@ -239,7 +192,7 @@ impl Registry for SqliteRegistry {
             WHERE id = ?1
             "#,
         )
-        .bind(&entry.id)
+        .bind(entry.id as i64)
         .bind(&entry.name)
         .bind(&entry.source_url)
         .bind(source_kind_str)
@@ -252,7 +205,7 @@ impl Registry for SqliteRegistry {
         .execute(&self.pool)
         .await?;
         
-        info!(map_id = %entry.id, "Updated map in registry");
+        info!(map_id = entry.id, "Updated map in registry");
         Ok(())
     }
 }
@@ -270,9 +223,9 @@ use chrono::Utc;
         SqliteRegistry::new(&db_path).await.unwrap()
     }
 
-    fn create_test_map_entry(id: &str) -> MapEntry {
+    fn create_test_map_entry(id: u64) -> MapEntry {
         MapEntry {
-            id: id.to_string(),
+            id,
             name: "Test Map".to_string(),
             source_url: "https://example.com/map.zip".to_string(),
             source_kind: models::SourceKind::Workshop,
@@ -296,11 +249,12 @@ use chrono::Utc;
     #[tokio::test]
     async fn test_add_map() {
         let registry = setup_test_registry().await;
-        let entry = create_test_map_entry("test-id-1");
+        let mut entry = create_test_map_entry(0); // ID will be assigned by database
         
-        registry.add_map(entry.clone()).await.unwrap();
+        let assigned_id = registry.add_map(entry.clone()).await.unwrap();
+        entry.id = assigned_id;
         
-        let retrieved = registry.get_map("test-id-1").await.unwrap();
+        let retrieved = registry.get_map(assigned_id).await.unwrap();
         assert!(retrieved.is_some());
         let retrieved_entry = retrieved.unwrap();
         assert_eq!(retrieved_entry.id, entry.id);
@@ -312,8 +266,8 @@ use chrono::Utc;
     #[tokio::test]
     async fn test_add_map_without_optional_fields() {
         let registry = setup_test_registry().await;
-        let entry = MapEntry {
-            id: "test-id-2".to_string(),
+        let mut entry = MapEntry {
+            id: 0, // Will be assigned by database
             name: "Test Map 2".to_string(),
             source_url: "https://example.com/map2.zip".to_string(),
             source_kind: models::SourceKind::Other,
@@ -325,9 +279,10 @@ use chrono::Utc;
             checksum_kind: None,
         };
         
-        registry.add_map(entry.clone()).await.unwrap();
+        let assigned_id = registry.add_map(entry.clone()).await.unwrap();
+        entry.id = assigned_id;
         
-        let retrieved = registry.get_map("test-id-2").await.unwrap();
+        let retrieved = registry.get_map(assigned_id).await.unwrap();
         assert!(retrieved.is_some());
         let retrieved_entry = retrieved.unwrap();
         assert_eq!(retrieved_entry.workshop_id, None);
@@ -337,36 +292,37 @@ use chrono::Utc;
     #[tokio::test]
     async fn test_get_map_exists() {
         let registry = setup_test_registry().await;
-        let entry = create_test_map_entry("test-id-3");
-        registry.add_map(entry.clone()).await.unwrap();
+        let mut entry = create_test_map_entry(0);
+        let assigned_id = registry.add_map(entry.clone()).await.unwrap();
+        entry.id = assigned_id;
         
-        let retrieved = registry.get_map("test-id-3").await.unwrap();
+        let retrieved = registry.get_map(assigned_id).await.unwrap();
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().id, "test-id-3");
+        assert_eq!(retrieved.unwrap().id, assigned_id);
     }
 
     #[tokio::test]
     async fn test_get_map_not_exists() {
         let registry = setup_test_registry().await;
         
-        let retrieved = registry.get_map("non-existent-id").await.unwrap();
+        let retrieved = registry.get_map(99999).await.unwrap();
         assert!(retrieved.is_none());
     }
 
     #[tokio::test]
     async fn test_remove_map() {
         let registry = setup_test_registry().await;
-        let entry = create_test_map_entry("test-id-4");
-        registry.add_map(entry).await.unwrap();
+        let mut entry = create_test_map_entry(0);
+        let assigned_id = registry.add_map(entry).await.unwrap();
         
         // Verify it exists
-        assert!(registry.get_map("test-id-4").await.unwrap().is_some());
+        assert!(registry.get_map(assigned_id).await.unwrap().is_some());
         
         // Remove it
-        registry.remove_map("test-id-4").await.unwrap();
+        registry.remove_map(assigned_id).await.unwrap();
         
         // Verify it's gone
-        assert!(registry.get_map("test-id-4").await.unwrap().is_none());
+        assert!(registry.get_map(assigned_id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -374,7 +330,7 @@ use chrono::Utc;
         let registry = setup_test_registry().await;
         
         // Should not error when removing non-existent map
-        registry.remove_map("non-existent-id").await.unwrap();
+        registry.remove_map(99999).await.unwrap();
     }
 
     #[tokio::test]
@@ -387,10 +343,10 @@ use chrono::Utc;
     #[tokio::test]
     async fn test_list_maps_multiple() {
         let registry = setup_test_registry().await;
-        let entry1 = create_test_map_entry("test-id-5");
-        let entry2 = create_test_map_entry("test-id-6");
-        let entry3 = MapEntry {
-            id: "test-id-7".to_string(),
+        let mut entry1 = create_test_map_entry(0);
+        let mut entry2 = create_test_map_entry(0);
+        let mut entry3 = MapEntry {
+            id: 0, // Will be assigned by database
             name: "Test Map 7".to_string(),
             source_url: "https://example.com/map7.zip".to_string(),
             source_kind: models::SourceKind::Other,
@@ -402,31 +358,32 @@ use chrono::Utc;
             checksum_kind: None,
         };
         
-        registry.add_map(entry1).await.unwrap();
-        registry.add_map(entry2).await.unwrap();
-        registry.add_map(entry3).await.unwrap();
+        let id1 = registry.add_map(entry1).await.unwrap();
+        let id2 = registry.add_map(entry2).await.unwrap();
+        let id3 = registry.add_map(entry3).await.unwrap();
         
         let maps = registry.list_maps().await.unwrap();
         assert_eq!(maps.len(), 3);
         
-        let ids: Vec<String> = maps.iter().map(|m| m.id.clone()).collect();
-        assert!(ids.contains(&"test-id-5".to_string()));
-        assert!(ids.contains(&"test-id-6".to_string()));
-        assert!(ids.contains(&"test-id-7".to_string()));
+        let ids: Vec<u64> = maps.iter().map(|m| m.id).collect();
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+        assert!(ids.contains(&id3));
     }
 
     #[tokio::test]
     async fn test_update_map() {
         let registry = setup_test_registry().await;
-        let mut entry = create_test_map_entry("test-id-8");
-        registry.add_map(entry.clone()).await.unwrap();
+        let mut entry = create_test_map_entry(0);
+        let assigned_id = registry.add_map(entry.clone()).await.unwrap();
+        entry.id = assigned_id;
         
         // Update the entry
         entry.name = "Updated Map Name".to_string();
         entry.version = Some("2.0.0".to_string());
         registry.update_map(entry.clone()).await.unwrap();
         
-        let retrieved = registry.get_map("test-id-8").await.unwrap();
+        let retrieved = registry.get_map(assigned_id).await.unwrap();
         assert!(retrieved.is_some());
         let retrieved_entry = retrieved.unwrap();
         assert_eq!(retrieved_entry.name, "Updated Map Name");
@@ -434,22 +391,24 @@ use chrono::Utc;
     }
 
     #[tokio::test]
-    async fn test_duplicate_id_error() {
+    async fn test_auto_increment_ids() {
         let registry = setup_test_registry().await;
-        let entry1 = create_test_map_entry("test-id-9");
-        let entry2 = create_test_map_entry("test-id-9");
+        let mut entry1 = create_test_map_entry(0);
+        let mut entry2 = create_test_map_entry(0);
         
-        registry.add_map(entry1).await.unwrap();
+        let id1 = registry.add_map(entry1.clone()).await.unwrap();
+        let id2 = registry.add_map(entry2.clone()).await.unwrap();
         
-        // SQLite will error on duplicate primary key
-        let result = registry.add_map(entry2).await;
-        assert!(result.is_err());
+        // IDs should be sequential
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
     }
 
     #[tokio::test]
     async fn test_update_non_existent_map() {
         let registry = setup_test_registry().await;
-        let entry = create_test_map_entry("test-id-10");
+        let mut entry = create_test_map_entry(0);
+        entry.id = 99999; // Non-existent ID
         
         // Update should not error even if map doesn't exist
         // (it will just update 0 rows)
@@ -460,8 +419,8 @@ use chrono::Utc;
     async fn test_map_with_long_path() {
         let registry = setup_test_registry().await;
         let long_path = "/".to_string() + &"a".repeat(500) + "/test/map";
-        let entry = MapEntry {
-            id: "test-id-11".to_string(),
+        let mut entry = MapEntry {
+            id: 0, // Will be assigned by database
             name: "Test Map".to_string(),
             source_url: "https://example.com/map.zip".to_string(),
             source_kind: models::SourceKind::Other,
@@ -473,9 +432,10 @@ use chrono::Utc;
             checksum_kind: None,
         };
         
-        registry.add_map(entry.clone()).await.unwrap();
+        let assigned_id = registry.add_map(entry.clone()).await.unwrap();
+        entry.id = assigned_id;
         
-        let retrieved = registry.get_map("test-id-11").await.unwrap();
+        let retrieved = registry.get_map(assigned_id).await.unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().installed_path, long_path);
     }
