@@ -100,3 +100,74 @@ impl Downloader for WorkshopDownloader {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::ServerGuard;
+    use tempfile::TempDir;
+
+    async fn setup_mock_server() -> (ServerGuard, String) {
+        let server = mockito::Server::new_async().await;
+        let base_url = server.url();
+        (server, base_url)
+    }
+
+    #[tokio::test]
+    async fn test_download_zip_delegation() {
+        let (mut server, base_url) = setup_mock_server().await;
+        let temp_dir = TempDir::new().unwrap();
+        let downloader = WorkshopDownloader::new(temp_dir.path().to_path_buf()).unwrap();
+        
+        let mock = server.mock("GET", "/test.zip")
+            .with_status(200)
+            .with_body("zip content")
+            .create_async()
+            .await;
+        
+        let url = format!("{}/test.zip", base_url);
+        let result = downloader.download_zip(&url).await;
+        
+        assert!(result.is_ok());
+        let downloaded_path = result.unwrap();
+        assert!(downloaded_path.exists());
+        
+        let content = std::fs::read_to_string(&downloaded_path).unwrap();
+        assert_eq!(content, "zip content");
+        
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_download_workshop_requires_steam_connection() {
+        // Note: This test will fail because it requires a real Steam connection.
+        // In a real scenario, we would either:
+        // 1. Mock the SteamConnection
+        // 2. Use integration tests with actual Steam API
+        // 3. Skip this test in CI
+        //
+        // For now, we'll test that the error is handled gracefully
+        
+        let temp_dir = TempDir::new().unwrap();
+        let downloader = WorkshopDownloader::new(temp_dir.path().to_path_buf()).unwrap();
+        
+        // This will fail because we can't connect to Steam in unit tests
+        // The exact error depends on network/Steam API availability
+        let result = downloader.download_workshop(123456789).await;
+        assert!(result.is_err());
+        
+        // Verify the error message indicates Steam connection issue
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("Steam connection") || 
+            error_msg.contains("Failed to establish") ||
+            error_msg.contains("hcontent") ||
+            error_msg.contains("network")
+        );
+    }
+
+    // Note: To properly test Steam integration, we would need:
+    // 1. A mock implementation of SteamConnection
+    // 2. Or integration tests with actual Steam API access
+    // 3. Or use dependency injection to allow injecting a mock SteamConnection
+}
+

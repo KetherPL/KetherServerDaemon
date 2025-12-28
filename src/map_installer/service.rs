@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+    use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::downloader::{workshop::WorkshopDownloader, zip::ZipDownloader, traits::Downloader};
-use crate::extractor::{zip::ZipExtractor, traits::{Extractor, VpkMetadata}, vpk::VpkExtractor};
+use crate::extractor::{zip::ZipExtractor, traits::Extractor, vpk::VpkExtractor};
 use crate::registry::{models::MapEntry, traits::Registry};
 use crate::map_installer::url_parser::{parse_url, UrlType};
 
@@ -494,5 +494,144 @@ fn copy_directory(src: PathBuf, dst: PathBuf) -> std::pin::Pin<Box<dyn std::futu
         
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers;
+    use mockito::ServerGuard;
+    use tempfile::TempDir;
+    use zip::write::{FileOptions, ZipWriter};
+    use zip::CompressionMethod;
+    use std::io::Write;
+
+    async fn setup_test_service() -> (MapInstallationService, TempDir, Arc<dyn Registry>) {
+        let registry: Arc<dyn Registry> = Arc::new(test_helpers::setup_test_database().await.unwrap());
+        let temp_dir = test_helpers::create_temp_dir();
+        let addons_dir = test_helpers::create_temp_dir();
+        
+        let service = MapInstallationService::new(
+            Arc::clone(&registry),
+            addons_dir.path().to_path_buf(),
+            temp_dir.path().to_path_buf(),
+        ).await.unwrap();
+        
+        (service, addons_dir, registry)
+    }
+
+    fn create_test_zip_with_map(contents: &[(&str, &[u8])]) -> (PathBuf, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let zip_path = temp_dir.path().join("test_map.zip");
+        
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        
+        for (name, data) in contents {
+            zip.start_file(*name, FileOptions::default().compression_method(CompressionMethod::Stored)).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        
+        zip.finish().unwrap();
+        (zip_path, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_registry_accessor() {
+        let (service, _addons_dir, registry) = setup_test_service().await;
+        // Verify we can access the registry
+        let service_registry = service.registry();
+        assert_eq!(Arc::as_ptr(service_registry), Arc::as_ptr(&registry));
+    }
+
+    #[tokio::test]
+    async fn test_uninstall_map_exists() {
+        let (service, _addons_dir, registry) = setup_test_service().await;
+        
+        // Add a test map entry
+        let map_entry = MapEntry {
+            id: "test-map-id".to_string(),
+            name: "Test Map".to_string(),
+            source_url: "https://example.com/map.zip".to_string(),
+            workshop_id: None,
+            installed_path: PathBuf::from("/nonexistent/path"), // Path doesn't need to exist for this test
+            installed_at: chrono::Utc::now(),
+            version: None,
+        };
+        registry.add_map(map_entry.clone()).await.unwrap();
+        
+        // Uninstall should succeed even if path doesn't exist
+        let result = service.uninstall_map("test-map-id").await;
+        assert!(result.is_ok());
+        
+        // Verify map was removed from registry
+        let retrieved = registry.get_map("test-map-id").await.unwrap();
+        assert!(retrieved.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_uninstall_map_not_exists() {
+        let (service, _addons_dir, _registry) = setup_test_service().await;
+        
+        // Uninstall non-existent map should not error
+        let result = service.uninstall_map("non-existent-id").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_install_from_url_dispatch_workshop() {
+        let (service, _addons_dir, _registry) = setup_test_service().await;
+        
+        // This will fail because Steam connection isn't available in tests,
+        // but we can verify it dispatches to workshop downloader
+        let result = service.install_from_url("123456789".to_string(), None).await;
+        assert!(result.is_err());
+        
+        // Error should indicate Steam/workshop related issue
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("Steam") || 
+            error_msg.contains("workshop") ||
+            error_msg.contains("hcontent") ||
+            error_msg.contains("network")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_install_from_url_dispatch_zip() {
+        let (mut server, base_url) = {
+            let s = mockito::Server::new_async().await;
+            let url = s.url();
+            (s, url)
+        };
+        let (service, _addons_dir, registry) = setup_test_service().await;
+        
+        // Create a mock ZIP file response
+        let (test_zip_path, _zip_temp) = create_test_zip_with_map(&[
+            ("test_map.bsp", b"BSP data"),
+            ("readme.txt", b"Test map"),
+        ]);
+        let zip_content = std::fs::read(&test_zip_path).unwrap();
+        
+        let mock = server.mock("GET", "/test_map.zip")
+            .with_status(200)
+            .with_body(zip_content)
+            .create_async()
+            .await;
+        
+        let url = format!("{}/test_map.zip", base_url);
+        let result = service.install_from_url(url, Some("Test Map".to_string())).await;
+        
+        // Should succeed and register the map
+        assert!(result.is_ok());
+        let map_entry = result.unwrap();
+        assert_eq!(map_entry.name, "Test Map");
+        
+        // Verify map is in registry
+        let retrieved = registry.get_map(&map_entry.id).await.unwrap();
+        assert!(retrieved.is_some());
+        
+        mock.assert_async().await;
+    }
 }
 

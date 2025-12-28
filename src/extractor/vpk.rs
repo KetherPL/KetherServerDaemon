@@ -117,3 +117,116 @@ impl Default for VpkExtractor {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_extract_value_valid() {
+        let line = r#"  "addonTitle" "Test Map""#;
+        let result = VpkExtractor::extract_value(line, "addonTitle");
+        assert_eq!(result, Some("Test Map".to_string()));
+    }
+
+    #[test]
+    fn test_extract_value_case_insensitive() {
+        let line = r#"  "ADDONTITLE" "Test Map Uppercase""#;
+        let result = VpkExtractor::extract_value(line, "addonTitle");
+        assert_eq!(result, Some("Test Map Uppercase".to_string()));
+    }
+
+    #[test]
+    fn test_extract_value_without_quotes_around_key() {
+        let line = r#"  addonTitle "Test Map No Quotes""#;
+        let result = VpkExtractor::extract_value(line, "addonTitle");
+        assert_eq!(result, Some("Test Map No Quotes".to_string()));
+    }
+
+    #[test]
+    fn test_extract_value_version() {
+        let line = r#"    "addonVersion" "1.2.3""#;
+        let result = VpkExtractor::extract_value(line, "addonVersion");
+        assert_eq!(result, Some("1.2.3".to_string()));
+    }
+
+    #[test]
+    fn test_extract_value_not_found() {
+        let line = r#"  "otherKey" "some value""#;
+        let result = VpkExtractor::extract_value(line, "addonTitle");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_value_empty_line() {
+        let line = "";
+        let result = VpkExtractor::extract_value(line, "addonTitle");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_value_multiple_quotes() {
+        let line = r#"  "addonTitle" "Test \"Quoted\" Map""#;
+        let result = VpkExtractor::extract_value(line, "addonTitle");
+        // Should extract up to the closing quote
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_extract_zip_not_supported() {
+        let extractor = VpkExtractor::new();
+        let temp_dir = TempDir::new().unwrap();
+        let fake_zip = temp_dir.path().join("test.zip");
+        std::fs::write(&fake_zip, b"fake zip").unwrap();
+        
+        let dest_dir = TempDir::new().unwrap();
+        let dest_path = dest_dir.path().to_path_buf();
+        
+        let result = extractor.extract_zip(fake_zip, dest_path).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ZIP extraction not supported"));
+    }
+
+    #[tokio::test]
+    async fn test_extract_vpk_succeeds() {
+        let extractor = VpkExtractor::new();
+        let temp_dir = TempDir::new().unwrap();
+        let fake_vpk = temp_dir.path().join("test.vpk");
+        std::fs::write(&fake_vpk, b"fake vpk").unwrap();
+        
+        let dest_dir = TempDir::new().unwrap();
+        let dest_path = dest_dir.path().to_path_buf();
+        
+        // VPK extraction should succeed (just logs that extraction is not needed)
+        let result = extractor.extract_vpk(fake_vpk, dest_path).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_extract_vpk_metadata_nonexistent_file() {
+        let extractor = VpkExtractor::new();
+        let nonexistent_vpk = PathBuf::from("/nonexistent/path/test.vpk");
+        
+        let result = extractor.extract_vpk_metadata(nonexistent_vpk).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_extract_vpk_metadata_invalid_file() {
+        let extractor = VpkExtractor::new();
+        let temp_dir = TempDir::new().unwrap();
+        let fake_vpk = temp_dir.path().join("test.vpk");
+        std::fs::write(&fake_vpk, b"This is not a valid VPK file").unwrap();
+        
+        let result = extractor.extract_vpk_metadata(fake_vpk).await;
+        assert!(result.is_err());
+        // Should error because it's not a valid VPK format
+    }
+
+    // Note: Testing with real VPK files would require either:
+    // 1. Creating minimal valid VPK files as test fixtures
+    // 2. Using mock objects for the VPK reader
+    // 3. Using actual VPK files from the game
+    // For now, we test the helper functions and error paths that don't require valid VPK files.
+}
+

@@ -67,15 +67,141 @@ mod tests {
     }
     
     #[test]
-    fn test_parse_workshop_url() {
+    fn test_parse_numeric_workshop_id_boundary_valid() {
+        // Minimum valid (just above 1000)
+        assert!(matches!(parse_url("1001").unwrap(), UrlType::WorkshopId(1001)));
+        // Large valid ID
+        assert!(matches!(parse_url("999999999999999999").unwrap(), UrlType::WorkshopId(999999999999999999)));
+    }
+    
+    #[test]
+    fn test_parse_numeric_workshop_id_too_small() {
+        // Too small (< 1000) should default to ZIP URL
+        let result = parse_url("999").unwrap();
+        match result {
+            UrlType::ZipUrl(_) => {} // Expected
+            _ => panic!("Expected ZipUrl for ID < 1000"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_workshop_url_https() {
         let url = "https://steamcommunity.com/sharedfiles/filedetails/?id=123456789";
         assert!(matches!(parse_url(url).unwrap(), UrlType::WorkshopId(123456789)));
     }
     
     #[test]
-    fn test_parse_zip_url() {
+    fn test_parse_workshop_url_http() {
+        let url = "http://steamcommunity.com/sharedfiles/filedetails/?id=987654321";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::WorkshopId(987654321)));
+    }
+    
+    #[test]
+    fn test_parse_workshop_url_with_additional_params() {
+        let url = "https://steamcommunity.com/sharedfiles/filedetails/?id=555555555&searchtext=test";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::WorkshopId(555555555)));
+    }
+    
+    #[test]
+    fn test_parse_workshop_url_with_ampersand_first() {
+        let url = "https://steamcommunity.com/sharedfiles/filedetails/?searchtext=test&id=444444444";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::WorkshopId(444444444)));
+    }
+    
+    #[test]
+    fn test_parse_workshop_url_with_hash() {
+        let url = "https://steamcommunity.com/sharedfiles/filedetails/?id=333333333#comments";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::WorkshopId(333333333)));
+    }
+    
+    #[test]
+    fn test_parse_zip_url_lowercase() {
         let url = "https://example.com/map.zip";
         assert!(matches!(parse_url(url).unwrap(), UrlType::ZipUrl(_)));
+    }
+    
+    #[test]
+    fn test_parse_zip_url_uppercase() {
+        let url = "https://example.com/map.ZIP";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::ZipUrl(_)));
+    }
+    
+    #[test]
+    fn test_parse_zip_url_http() {
+        let url = "http://example.com/map.zip";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::ZipUrl(_)));
+    }
+    
+    #[test]
+    fn test_parse_zip_url_with_path() {
+        let url = "https://example.com/maps/custom/test_map.zip";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::ZipUrl(_)));
+    }
+    
+    #[test]
+    fn test_parse_zip_url_with_query_params() {
+        let url = "https://example.com/download?file=map.zip";
+        let result = parse_url(url).unwrap();
+        match result {
+            UrlType::ZipUrl(url_str) => assert!(url_str.contains("example.com")),
+            _ => panic!("Expected ZipUrl"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_generic_https_url_as_zip() {
+        let url = "https://example.com/download";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::ZipUrl(_)));
+    }
+    
+    #[test]
+    fn test_parse_invalid_url_string_as_zip() {
+        // Invalid URLs should default to ZipUrl
+        let url = "not-a-valid-url-at-all";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::ZipUrl(_)));
+    }
+    
+    #[test]
+    fn test_parse_empty_string_as_zip() {
+        // Empty string should default to ZipUrl
+        let url = "";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::ZipUrl(_)));
+    }
+    
+    #[test]
+    fn test_parse_workshop_url_malformed_id() {
+        // URL with non-numeric ID should fall through to ZipUrl
+        let url = "https://steamcommunity.com/sharedfiles/filedetails/?id=abc123";
+        let result = parse_url(url).unwrap();
+        match result {
+            UrlType::ZipUrl(_) => {} // Expected - malformed ID
+            _ => panic!("Expected ZipUrl for malformed workshop ID"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_workshop_url_no_id_param() {
+        // Workshop URL without ID parameter should be treated as ZIP
+        let url = "https://steamcommunity.com/sharedfiles/filedetails/";
+        let result = parse_url(url).unwrap();
+        match result {
+            UrlType::ZipUrl(_) => {} // Expected
+            _ => panic!("Expected ZipUrl for workshop URL without ID"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_workshop_url_regex_fallback() {
+        // Test regex fallback for unusual workshop URL formats
+        let url = "steamcommunity.com/sharedfiles/filedetails/?id=222222222";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::WorkshopId(222222222)));
+    }
+    
+    #[test]
+    fn test_parse_workshop_id_extraction_from_regex() {
+        // Test regex pattern matching
+        let url = "workshop?id=111111111";
+        assert!(matches!(parse_url(url).unwrap(), UrlType::WorkshopId(111111111)));
     }
 }
 

@@ -63,6 +63,10 @@ futures-util = "0.3"
 steam-vent = "0.4.2"
 steam-vent-proto-steam = "0.5.2"
 
+[dev-dependencies]
+# HTTP server mocking for download tests
+mockito = "1.2"
+
 # The default release profile. It contains all optimizations, without
 # sacrificing debug info. With this profile (like in the standard
 # release profile), the debug info and the stack traces will still be available.

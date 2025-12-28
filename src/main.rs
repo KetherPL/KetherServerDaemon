@@ -9,6 +9,9 @@ mod registry;
 mod sync;
 mod watcher;
 
+#[cfg(test)]
+mod test_helpers;
+
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info, warn};
