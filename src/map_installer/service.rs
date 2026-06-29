@@ -632,6 +632,19 @@ impl MapInstallationService {
         }))
     }
     
+    /// During an update, keep the existing record's curated source identity when the
+    /// freshly detected entry carries no workshop metadata. A file scan that finds no
+    /// workshop id yields placeholders (`workshop_id=None`, `source_kind=Other`,
+    /// `source_url="detected:<path>"`); those must not overwrite values a user set
+    /// manually (e.g. via `modify`) or that were detected previously.
+    fn preserve_source_identity(fresh: &mut MapEntry, existing: &MapEntry) {
+        if fresh.workshop_id.is_none() {
+            fresh.workshop_id = existing.workshop_id;
+            fresh.source_kind = existing.source_kind;
+            fresh.source_url = existing.source_url.clone();
+        }
+    }
+
     /// Detect map from filesystem path (for watcher)
     pub async fn detect_map_from_path(&self, path: PathBuf) -> anyhow::Result<Option<MapEntry>> {
         // Convert absolute path to relative path (if it's within addons_dir)
@@ -705,6 +718,7 @@ impl MapInstallationService {
 
                         if changed {
                             fresh_entry.id = existing.id;
+                            Self::preserve_source_identity(&mut fresh_entry, &existing);
                             match self.registry.update_map(fresh_entry.clone()).await {
                                 Ok(()) => {
                                     existing_by_path
@@ -805,6 +819,61 @@ impl MapInstallationService {
             removed,
             kept: survivors,
         })
+    }
+
+    fn parse_source_kind(value: &str) -> anyhow::Result<SourceKind> {
+        match value.to_lowercase().as_str() {
+            "workshop" => Ok(SourceKind::Workshop),
+            "sirplease" => Ok(SourceKind::SirPlease),
+            "other" => Ok(SourceKind::Other),
+            other => Err(anyhow::anyhow!(
+                "Invalid source_kind '{other}' (expected: workshop, sirplease, other)"
+            )),
+        }
+    }
+
+    /// Modify a single editable field on an existing map record and persist the change.
+    pub async fn modify_map_field(
+        &self,
+        id: u64,
+        field: &str,
+        value: &str,
+    ) -> anyhow::Result<MapEntry> {
+        let mut entry = self
+            .registry
+            .get_map(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Map not found: {id}"))?;
+
+        match field.to_lowercase().as_str() {
+            "name" => entry.name = value.to_string(),
+            "source_url" | "url" => entry.source_url = value.to_string(),
+            "version" => entry.version = Some(value.to_string()),
+            "source_kind" | "kind" => {
+                let kind = Self::parse_source_kind(value)?;
+                entry.source_kind = kind;
+                if kind != SourceKind::Workshop {
+                    entry.workshop_id = None;
+                }
+            }
+            "workshop_id" | "wid" => {
+                let wid = value
+                    .parse::<u64>()
+                    .with_context(|| format!("Invalid workshop_id '{value}'"))?;
+                entry.workshop_id = Some(wid);
+                entry.source_kind = SourceKind::Workshop;
+                entry.source_url =
+                    format!("https://steamcommunity.com/sharedfiles/filedetails/?id={wid}");
+            }
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Unknown or read-only field '{other}'. Editable: name, source_url, version, source_kind, workshop_id"
+                ));
+            }
+        }
+
+        self.registry.update_map(entry.clone()).await?;
+        Ok(entry)
     }
     
     /// Get reference to registry (for sync task)
@@ -1063,6 +1132,168 @@ mod tests {
         assert_eq!(maps[0].name, "Alpha");
         assert_eq!(maps[1].id, 2);
         assert_eq!(maps[1].name, "Zulu");
+    }
+
+    fn create_modify_test_entry() -> MapEntry {
+        MapEntry {
+            id: 0,
+            name: "Test Map".to_string(),
+            source_url: "https://example.com/map.zip".to_string(),
+            source_kind: SourceKind::Workshop,
+            workshop_id: Some(999),
+            installed_path: "test_map.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            version: Some("1.0".to_string()),
+            checksum: None,
+            checksum_kind: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_modify_map_field_workshop_id_sets_kind_and_url() {
+        let (service, _addons_dir, registry) = setup_test_service().await;
+        let id = registry.add_map(create_modify_test_entry()).await.unwrap();
+
+        let updated = service
+            .modify_map_field(id, "workshop_id", "3135451698")
+            .await
+            .unwrap();
+
+        assert_eq!(updated.workshop_id, Some(3135451698));
+        assert_eq!(updated.source_kind, SourceKind::Workshop);
+        assert_eq!(
+            updated.source_url,
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=3135451698"
+        );
+
+        let retrieved = registry.get_map(id).await.unwrap().unwrap();
+        assert_eq!(retrieved.workshop_id, Some(3135451698));
+        assert_eq!(retrieved.source_kind, SourceKind::Workshop);
+        assert_eq!(
+            retrieved.source_url,
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=3135451698"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_modify_map_field_source_kind_other_clears_workshop_id() {
+        let (service, _addons_dir, registry) = setup_test_service().await;
+        let id = registry.add_map(create_modify_test_entry()).await.unwrap();
+
+        let updated = service
+            .modify_map_field(id, "source_kind", "other")
+            .await
+            .unwrap();
+
+        assert_eq!(updated.source_kind, SourceKind::Other);
+        assert_eq!(updated.workshop_id, None);
+
+        let retrieved = registry.get_map(id).await.unwrap().unwrap();
+        assert_eq!(retrieved.source_kind, SourceKind::Other);
+        assert_eq!(retrieved.workshop_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_modify_map_field_unknown_field_errors() {
+        let (service, _addons_dir, registry) = setup_test_service().await;
+        let id = registry.add_map(create_modify_test_entry()).await.unwrap();
+
+        let result = service
+            .modify_map_field(id, "installed_path", "other.vpk")
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown or read-only field"));
+    }
+
+    #[tokio::test]
+    async fn test_modify_map_field_missing_id_errors() {
+        let (service, _addons_dir, _registry) = setup_test_service().await;
+
+        let result = service
+            .modify_map_field(99999, "name", "New Name")
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Map not found"));
+    }
+
+    #[test]
+    fn test_preserve_source_identity_keeps_existing_when_fresh_has_no_workshop_id() {
+        let existing = MapEntry {
+            id: 1,
+            name: "Existing".to_string(),
+            source_url: "https://steamcommunity.com/sharedfiles/filedetails/?id=12345".to_string(),
+            source_kind: SourceKind::Workshop,
+            workshop_id: Some(12345),
+            installed_path: "map.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            version: Some("1".to_string()),
+            checksum: Some("old".to_string()),
+            checksum_kind: Some("md5".to_string()),
+        };
+
+        let mut fresh = MapEntry {
+            id: 1,
+            name: "Fresh".to_string(),
+            source_url: "detected:/addons/map.vpk".to_string(),
+            source_kind: SourceKind::Other,
+            workshop_id: None,
+            installed_path: "map.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            version: Some("2".to_string()),
+            checksum: Some("new".to_string()),
+            checksum_kind: Some("md5".to_string()),
+        };
+
+        MapInstallationService::preserve_source_identity(&mut fresh, &existing);
+
+        assert_eq!(fresh.workshop_id, Some(12345));
+        assert_eq!(fresh.source_kind, SourceKind::Workshop);
+        assert_eq!(
+            fresh.source_url,
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=12345"
+        );
+        assert_eq!(fresh.name, "Fresh");
+        assert_eq!(fresh.version, Some("2".to_string()));
+        assert_eq!(fresh.checksum, Some("new".to_string()));
+    }
+
+    #[test]
+    fn test_preserve_source_identity_uses_fresh_when_workshop_id_detected() {
+        let existing = MapEntry {
+            id: 1,
+            name: "Existing".to_string(),
+            source_url: "detected:/addons/map.vpk".to_string(),
+            source_kind: SourceKind::Other,
+            workshop_id: None,
+            installed_path: "map.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            version: Some("1".to_string()),
+            checksum: Some("old".to_string()),
+            checksum_kind: Some("md5".to_string()),
+        };
+
+        let mut fresh = MapEntry {
+            id: 1,
+            name: "Fresh".to_string(),
+            source_url: "https://steamcommunity.com/sharedfiles/filedetails/?id=999".to_string(),
+            source_kind: SourceKind::Workshop,
+            workshop_id: Some(999),
+            installed_path: "map.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            version: Some("2".to_string()),
+            checksum: Some("new".to_string()),
+            checksum_kind: Some("md5".to_string()),
+        };
+
+        MapInstallationService::preserve_source_identity(&mut fresh, &existing);
+
+        assert_eq!(fresh.workshop_id, Some(999));
+        assert_eq!(fresh.source_kind, SourceKind::Workshop);
+        assert_eq!(
+            fresh.source_url,
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=999"
+        );
     }
 }
 

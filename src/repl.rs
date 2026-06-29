@@ -73,6 +73,12 @@ impl Repl {
                             "compact" => {
                                 self.handle_compact(&runtime_handle);
                             }
+                            "info" => {
+                                self.handle_info(&runtime_handle, args.first().copied());
+                            }
+                            "modify" => {
+                                self.handle_modify(&runtime_handle, &args);
+                            }
                             "q" | "quit" | "exit" => {
                                 println!("Exiting REPL...");
                                 break;
@@ -126,6 +132,8 @@ impl Repl {
         println!("  rm, remove, uninstall <id> - Remove map by ID");
         println!("  scan, discover, d [u|U] - Scan addons dir; u=update changed, U=force update all");
         println!("  compact - Remove orphaned records, sort by name, reindex IDs from 1");
+        println!("  info <id> - Show all stored fields for a map");
+        println!("  modify <id> <field> <value> - Edit a field (name, source_url, version, source_kind, workshop_id)");
         println!("  q, quit, exit - Exit the REPL");
         println!("  S, stop - Stop the daemon");
     }
@@ -328,6 +336,91 @@ impl Repl {
             "  #{} | {} | version={} | source={} ({}) | path={}",
             map.id, map.name, version, source_kind, source, map.installed_path
         );
+    }
+
+    fn handle_info(&self, runtime_handle: &tokio::runtime::Handle, id_arg: Option<&str>) {
+        let Some(installer) = self.installer.as_ref() else {
+            eprintln!("Map installer unavailable.");
+            return;
+        };
+
+        let Some(id_raw) = id_arg else {
+            println!("Usage: info <id>");
+            return;
+        };
+
+        let map_id = match id_raw.parse::<u64>() {
+            Ok(map_id) => map_id,
+            Err(err) => {
+                eprintln!("Invalid map ID '{id_raw}': {err}");
+                return;
+            }
+        };
+
+        match runtime_handle.block_on(installer.registry().get_map(map_id)) {
+            Ok(Some(map)) => self.print_map_detail(&map),
+            Ok(None) => println!("Map #{map_id} not found."),
+            Err(err) => eprintln!("Failed to load map #{map_id}: {err}"),
+        }
+    }
+
+    fn handle_modify(&self, runtime_handle: &tokio::runtime::Handle, args: &[&str]) {
+        let Some(installer) = self.installer.as_ref() else {
+            eprintln!("Map installer unavailable.");
+            return;
+        };
+
+        if args.len() < 3 {
+            println!(
+                "Usage: modify <id> <field> <value>\nEditable fields: name, source_url, version, source_kind, workshop_id"
+            );
+            return;
+        }
+
+        let map_id = match args[0].parse::<u64>() {
+            Ok(map_id) => map_id,
+            Err(err) => {
+                eprintln!("Invalid map ID '{}': {err}", args[0]);
+                return;
+            }
+        };
+
+        let field = args[1];
+        let value = args[2..].join(" ");
+
+        match runtime_handle.block_on(installer.modify_map_field(map_id, field, &value)) {
+            Ok(map) => {
+                println!("Updated map #{}:", map.id);
+                self.print_map_detail(&map);
+            }
+            Err(err) => eprintln!("Modify failed: {err}"),
+        }
+    }
+
+    fn print_map_detail(&self, map: &MapEntry) {
+        let source_kind = match map.source_kind {
+            SourceKind::Workshop => "workshop",
+            SourceKind::SirPlease => "sirplease",
+            SourceKind::Other => "other",
+        };
+        let workshop_id = map
+            .workshop_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let version = map.version.as_deref().unwrap_or("-");
+        let checksum = map.checksum.as_deref().unwrap_or("-");
+        let checksum_kind = map.checksum_kind.as_deref().unwrap_or("-");
+
+        println!("  id:             {}", map.id);
+        println!("  name:           {}", map.name);
+        println!("  source_kind:    {source_kind}");
+        println!("  workshop_id:    {workshop_id}");
+        println!("  source_url:     {}", map.source_url);
+        println!("  version:        {version}");
+        println!("  installed_path: {}", map.installed_path);
+        println!("  installed_at:   {}", map.installed_at);
+        println!("  checksum:       {checksum}");
+        println!("  checksum_kind:  {checksum_kind}");
     }
 }
 
