@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use anyhow::Context;
 use tracing::{info, warn};
 
@@ -21,8 +21,16 @@ pub struct MapInstallationService {
 
 pub struct DiscoveryReport {
     pub added: Vec<MapEntry>,
+    pub updated: Vec<MapEntry>,
     pub skipped: usize,
     pub failed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryMode {
+    Add,
+    Update,
+    ForceUpdate,
 }
 
 impl MapInstallationService {
@@ -571,6 +579,53 @@ impl MapInstallationService {
         info!(map_id = map_id, "Map uninstalled successfully");
         Ok(())
     }
+
+    async fn file_modified_time(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+        let metadata = tokio::fs::metadata(path).await.ok()?;
+        let modified = metadata.modified().ok()?;
+        Some(chrono::DateTime::<chrono::Utc>::from(modified))
+    }
+
+    async fn build_map_entry_from_file(
+        &self,
+        path: &Path,
+        relative_path: &str,
+    ) -> anyhow::Result<Option<MapEntry>> {
+        let metadata = match self.vpk_extractor.extract_vpk_metadata(path.to_path_buf()).await {
+            Ok(metadata) => metadata,
+            Err(_) => return Ok(None),
+        };
+
+        let checksum = crate::utils::calculate_file_md5(path).await.ok();
+        let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
+        let installed_at = Self::file_modified_time(path).await.unwrap_or_else(chrono::Utc::now);
+
+        let (source_kind, workshop_id, source_url) = match metadata.workshop_id {
+            Some(workshop_id) => (
+                SourceKind::Workshop,
+                Some(workshop_id),
+                format!("https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"),
+            ),
+            None => (
+                SourceKind::Other,
+                None,
+                format!("detected:{}", path.display()),
+            ),
+        };
+
+        Ok(Some(MapEntry {
+            id: 0, // Temporary, set by DB for add or overwritten for update
+            name: metadata.title,
+            source_url,
+            source_kind,
+            workshop_id,
+            installed_path: relative_path.to_string(),
+            installed_at,
+            version: Some(metadata.version),
+            checksum,
+            checksum_kind,
+        }))
+    }
     
     /// Detect map from filesystem path (for watcher)
     pub async fn detect_map_from_path(&self, path: PathBuf) -> anyhow::Result<Option<MapEntry>> {
@@ -585,36 +640,20 @@ impl MapInstallationService {
         
         // Check if it's a VPK file
         if path.extension().and_then(|e| e.to_str()) == Some("vpk") {
-            if let Ok(metadata) = self.vpk_extractor.extract_vpk_metadata(path.clone()).await {
-                // Check if already registered (compare by relative path)
-                let maps = self.registry.list_maps().await?;
-                if let Some(existing) = maps.iter().find(|m| m.installed_path == relative_path) {
-                    return Ok(Some(existing.clone()));
-                }
-                
-                // Calculate checksum
-                let checksum = crate::utils::calculate_file_md5(&path).await.ok();
-                let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
-                
-                // Create new entry (ID will be assigned by database)
-                let mut map_entry = MapEntry {
-                    id: 0, // Temporary, will be replaced by database-assigned ID
-                    name: metadata.title,
-                    source_url: format!("detected:{}", path.display()),
-                    source_kind: SourceKind::Other,
-                    workshop_id: None,
-                    installed_path: relative_path.clone(), // Store relative path
-                    installed_at: chrono::Utc::now(),
-                    version: Some(metadata.version),
-                    checksum,
-                    checksum_kind,
-                };
-                
-                // Register in database and get assigned ID
-                let assigned_id = self.registry.add_map(map_entry.clone()).await?;
-                map_entry.id = assigned_id;
-                return Ok(Some(map_entry));
+            // Check if already registered (compare by relative path)
+            let maps = self.registry.list_maps().await?;
+            if let Some(existing) = maps.iter().find(|m| m.installed_path == relative_path) {
+                return Ok(Some(existing.clone()));
             }
+
+            let Some(mut map_entry) = self.build_map_entry_from_file(&path, &relative_path).await? else {
+                return Ok(None);
+            };
+
+            // Register in database and get assigned ID
+            let assigned_id = self.registry.add_map(map_entry.clone()).await?;
+            map_entry.id = assigned_id;
+            return Ok(Some(map_entry));
         }
         
         // Note: We no longer support detecting directories with .bsp files
@@ -622,17 +661,18 @@ impl MapInstallationService {
         Ok(None)
     }
 
-    /// Discover maps in addons_dir that are not yet registered.
-    pub async fn discover_maps(&self) -> anyhow::Result<DiscoveryReport> {
+    /// Discover maps in addons_dir and optionally update existing records.
+    pub async fn discover_maps(&self, mode: DiscoveryMode) -> anyhow::Result<DiscoveryReport> {
         let existing_maps = self.registry.list_maps().await?;
-        let mut existing_paths: HashSet<String> = existing_maps
+        let mut existing_by_path: HashMap<String, MapEntry> = existing_maps
             .into_iter()
-            .map(|map| map.installed_path)
+            .map(|map| (map.installed_path.clone(), map))
             .collect();
 
         let vpk_files = self.find_vpk_files_in_extracted(self.addons_dir.clone()).await?;
         let mut report = DiscoveryReport {
             added: Vec::new(),
+            updated: Vec::new(),
             skipped: 0,
             failed: 0,
         };
@@ -647,22 +687,55 @@ impl MapInstallationService {
                 }
             };
 
-            if existing_paths.contains(&relative_path) {
-                report.skipped += 1;
-                continue;
-            }
+            if let Some(existing) = existing_by_path.get(&relative_path).cloned() {
+                if mode == DiscoveryMode::Add {
+                    report.skipped += 1;
+                    continue;
+                }
 
-            match self.detect_map_from_path(path).await {
-                Ok(Some(entry)) => {
-                    existing_paths.insert(entry.installed_path.clone());
-                    report.added.push(entry);
+                match self.build_map_entry_from_file(&path, &relative_path).await {
+                    Ok(Some(mut fresh_entry)) => {
+                        let changed = mode == DiscoveryMode::ForceUpdate
+                            || fresh_entry.checksum != existing.checksum;
+
+                        if changed {
+                            fresh_entry.id = existing.id;
+                            match self.registry.update_map(fresh_entry.clone()).await {
+                                Ok(()) => {
+                                    existing_by_path
+                                        .insert(relative_path.clone(), fresh_entry.clone());
+                                    report.updated.push(fresh_entry);
+                                }
+                                Err(error) => {
+                                    warn!(error = %error, path = %path.display(), "Discovery failed to update map");
+                                    report.failed += 1;
+                                }
+                            }
+                        } else {
+                            report.skipped += 1;
+                        }
+                    }
+                    Ok(None) => {
+                        report.failed += 1;
+                    }
+                    Err(error) => {
+                        warn!(error = %error, path = %path.display(), "Discovery failed to rebuild map entry");
+                        report.failed += 1;
+                    }
                 }
-                Ok(None) => {
-                    report.failed += 1;
-                }
-                Err(error) => {
-                    warn!(error = %error, "Discovery failed to register map");
-                    report.failed += 1;
+            } else {
+                match self.detect_map_from_path(path).await {
+                    Ok(Some(entry)) => {
+                        existing_by_path.insert(entry.installed_path.clone(), entry.clone());
+                        report.added.push(entry);
+                    }
+                    Ok(None) => {
+                        report.failed += 1;
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "Discovery failed to register map");
+                        report.failed += 1;
+                    }
                 }
             }
         }

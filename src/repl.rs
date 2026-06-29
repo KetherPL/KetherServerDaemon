@@ -6,7 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use tokio::sync::mpsc;
 
-use crate::map_installer::{DiscoveryReport, MapInstallationService};
+use crate::map_installer::{DiscoveryMode, DiscoveryReport, MapInstallationService};
 use crate::registry::{MapEntry, SourceKind};
 
 #[derive(Debug, Clone, Copy)]
@@ -68,7 +68,7 @@ impl Repl {
                                 self.handle_remove(&runtime_handle, args.first().copied());
                             }
                             "scan" | "discover" | "d" => {
-                                self.handle_discover(&runtime_handle);
+                                self.handle_discover(&runtime_handle, &args);
                             }
                             "q" | "quit" | "exit" => {
                                 println!("Exiting REPL...");
@@ -121,7 +121,7 @@ impl Repl {
         println!("  ls, list, maps - List installed maps");
         println!("  i, install <url|workshop_id> [name] - Install a map");
         println!("  rm, remove, uninstall <id> - Remove map by ID");
-        println!("  scan, discover, d - Scan addons dir for unregistered maps");
+        println!("  scan, discover, d [u|U] - Scan addons dir; u=update changed, U=force update all");
         println!("  q, quit, exit - Exit the REPL");
         println!("  S, stop - Stop the daemon");
     }
@@ -220,13 +220,25 @@ impl Repl {
         }
     }
 
-    fn handle_discover(&self, runtime_handle: &tokio::runtime::Handle) {
+    fn handle_discover(&self, runtime_handle: &tokio::runtime::Handle, args: &[&str]) {
         let Some(installer) = self.installer.as_ref() else {
             eprintln!("Map installer unavailable.");
             return;
         };
 
-        match runtime_handle.block_on(installer.discover_maps()) {
+        let mode = match args.first().copied() {
+            None => DiscoveryMode::Add,
+            Some("u") | Some("update") => DiscoveryMode::Update,
+            Some("U") | Some("forceupdate") => DiscoveryMode::ForceUpdate,
+            Some(other) => {
+                eprintln!(
+                    "Unknown discovery argument '{other}'. Usage: d [u|U] (u=update, U=force update)."
+                );
+                return;
+            }
+        };
+
+        match runtime_handle.block_on(installer.discover_maps(mode)) {
             Ok(report) => self.print_discovery_report(report),
             Err(err) => {
                 eprintln!("Discovery failed: {err}");
@@ -236,8 +248,9 @@ impl Repl {
 
     fn print_discovery_report(&self, report: DiscoveryReport) {
         println!(
-            "Discovery complete: {} added, {} already registered, {} failed.",
+            "Discovery complete: {} added, {} updated, {} already current, {} failed.",
             report.added.len(),
+            report.updated.len(),
             report.skipped,
             report.failed
         );
@@ -246,6 +259,12 @@ impl Repl {
         } else {
             println!("Newly registered maps:");
             for map in report.added {
+                self.print_map_entry(&map);
+            }
+        }
+        if !report.updated.is_empty() {
+            println!("Updated maps:");
+            for map in report.updated {
                 self.print_map_entry(&map);
             }
         }

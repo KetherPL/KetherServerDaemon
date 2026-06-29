@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use async_trait::async_trait;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::path::PathBuf;
 use tracing::info;
@@ -26,6 +26,15 @@ impl VpkExtractor {
         let re = Regex::new(&pattern).unwrap();
         re.captures(line)
             .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+    }
+
+    fn parse_workshop_id(url: &str) -> Option<u64> {
+        let re = Regex::new(r"(?i)steamcommunity\.com/.*[?&]id=(\d+)").ok()?;
+        re.captures(url)?
+            .get(1)?
+            .as_str()
+            .parse::<u64>()
+            .ok()
     }
 
     fn extract_vpk_metadata_blocking(archive_path: PathBuf) -> anyhow::Result<VpkMetadata> {
@@ -71,6 +80,7 @@ impl VpkExtractor {
         // Parse metadata from KeyValue format
         let mut title: Option<String> = None;
         let mut version: Option<String> = None;
+        let mut addon_url: Option<String> = None;
 
         for line in content.lines() {
             if title.is_none() {
@@ -83,11 +93,20 @@ impl VpkExtractor {
                     version = Some(val);
                 }
             }
+            if addon_url.is_none() {
+                if let Some(val) = Self::extract_value(line, "addonURL0") {
+                    addon_url = Some(val);
+                }
+            }
         }
+        let workshop_id = addon_url
+            .as_deref()
+            .and_then(Self::parse_workshop_id);
 
         Ok(VpkMetadata {
             title: title.unwrap_or_else(|| "Unknown".to_string()),
             version: version.unwrap_or_else(|| "Unknown".to_string()),
+            workshop_id,
         })
     }
 }
@@ -179,6 +198,33 @@ mod tests {
         let result = VpkExtractor::extract_value(line, "addonTitle");
         // Should extract up to the closing quote
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_workshop_id_filedetails_url() {
+        let url = "http://steamcommunity.com/workshop/filedetails/?id=121786282";
+        let workshop_id = VpkExtractor::parse_workshop_id(url);
+        assert_eq!(workshop_id, Some(121786282));
+    }
+
+    #[test]
+    fn test_parse_workshop_id_sharedfiles_url() {
+        let url = "https://steamcommunity.com/sharedfiles/filedetails/?id=1234567890";
+        let workshop_id = VpkExtractor::parse_workshop_id(url);
+        assert_eq!(workshop_id, Some(1234567890));
+    }
+
+    #[test]
+    fn test_parse_workshop_id_non_steam_url() {
+        let url = "https://example.com/workshop/filedetails/?id=121786282";
+        let workshop_id = VpkExtractor::parse_workshop_id(url);
+        assert_eq!(workshop_id, None);
+    }
+
+    #[test]
+    fn test_parse_workshop_id_empty_url() {
+        let workshop_id = VpkExtractor::parse_workshop_id("");
+        assert_eq!(workshop_id, None);
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub struct VpkMetadata {
     pub title: String,
     pub version: String,
+    pub workshop_id: Option<u64>,
 }
 
 #[async_trait]
