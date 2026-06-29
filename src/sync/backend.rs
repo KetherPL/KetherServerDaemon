@@ -67,7 +67,7 @@ impl SyncService for BackendSyncService {
         
         let request = SyncRequest { maps: entries };
         let response = self
-            .build_post_request("api/registry/sync")
+            .build_post_request("registry/sync")
             .json(&request)
             .send()
             .await?;
@@ -87,7 +87,7 @@ impl SyncService for BackendSyncService {
         info!("Fetching updates from backend");
         
         let response = self
-            .build_request("api/registry/updates")
+            .build_request("registry/updates")
             .send()
             .await?;
         

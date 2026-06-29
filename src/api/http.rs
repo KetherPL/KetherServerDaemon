@@ -34,9 +34,9 @@ impl HttpServer {
         
         let app = Router::new()
             .route("/api/maps", get(list_maps_handler))
-            .route("/api/maps/:id", get(get_map_handler))
+            .route("/api/maps/{id}", get(get_map_handler))
             .route("/api/maps/install", post(install_map_handler))
-            .route("/api/maps/uninstall/:id", post(uninstall_map_handler))
+            .route("/api/maps/uninstall/{id}", post(uninstall_map_handler))
             .with_state(handlers.clone());
         
         info!(addr = %self.addr, "Starting HTTP server");
