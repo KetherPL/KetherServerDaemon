@@ -225,9 +225,13 @@ async fn main() -> anyhow::Result<()> {
     http_task.abort();
     repl_task.abort();
     
-    // Wait a bit for tasks to finish
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    // Give aborted tasks a brief moment to unwind and flush logs.
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     
     info!("Shutdown complete");
-    Ok(())
+    
+    // The REPL key listener runs an infinite keyboard-polling loop inside
+    // `spawn_blocking`, which cannot be aborted. Dropping the runtime would block
+    // forever waiting on that thread, so force process termination here.
+    std::process::exit(0);
 }
