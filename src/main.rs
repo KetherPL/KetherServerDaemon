@@ -20,7 +20,7 @@ use tracing::{error, info, warn};
 
 use config::Config;
 use logging::setup_logging;
-use registry::{Registry, SqliteRegistry};
+use registry::{JsonRegistry, Registry};
 use sync::{BackendSyncService, SyncService};
 use watcher::{InotifyWatcher, Watcher};
 use api::HttpServer;
@@ -38,8 +38,8 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting KetherServerDaemon v{}", env!("CARGO_PKG_VERSION"));
     
     // Initialize registry
-    let registry: Arc<dyn Registry> = Arc::new(SqliteRegistry::new(&config.registry_db_path).await?);
-    info!("Registry initialized at {}", config.registry_db_path.display());
+    let registry: Arc<dyn Registry> = Arc::new(JsonRegistry::new(&config.registry_path).await?);
+    info!("Registry initialized at {}", config.registry_path.display());
     
     // Initialize sync service
     let sync_service: Arc<dyn SyncService> = Arc::new(

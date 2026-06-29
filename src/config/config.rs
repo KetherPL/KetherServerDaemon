@@ -9,8 +9,8 @@ pub struct Config {
     /// Base Left 4 Dead 2 server directory
     pub l4d2_server_dir: PathBuf,
     
-    /// SQLite database path for registry
-    pub registry_db_path: PathBuf,
+    /// JSON registry file path
+    pub registry_path: PathBuf,
     
     /// Remote backend API endpoint URL
     pub backend_api_url: String,
@@ -71,8 +71,8 @@ impl Config {
         if let Ok(val) = std::env::var("KETHER_L4D2_SERVER_DIR") {
             config.l4d2_server_dir = PathBuf::from(val);
         }
-        if let Ok(val) = std::env::var("KETHER_REGISTRY_DB_PATH") {
-            config.registry_db_path = PathBuf::from(val);
+        if let Ok(val) = std::env::var("KETHER_REGISTRY_PATH") {
+            config.registry_path = PathBuf::from(val);
         }
         if let Ok(val) = std::env::var("KETHER_BACKEND_API_URL") {
             config.backend_api_url = val;
@@ -112,7 +112,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             l4d2_server_dir: PathBuf::from("/home/steam/l4d2"),
-            registry_db_path: PathBuf::from("registry.db"),
+            registry_path: PathBuf::from("registry.json"),
             backend_api_url: String::from("http://localhost:3000/api"),
             backend_api_key: None,
             local_api_bind: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
@@ -148,7 +148,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.l4d2_server_dir, PathBuf::from("/opt/l4d2/server"));
-        assert_eq!(config.registry_db_path, PathBuf::from("registry.db"));
+        assert_eq!(config.registry_path, PathBuf::from("registry.json"));
         assert_eq!(config.backend_api_url, "http://localhost:3000/api");
         assert_eq!(config.backend_api_key, None);
         assert_eq!(config.local_api_bind, SocketAddr::from_str("127.0.0.1:8080").unwrap());
@@ -171,7 +171,7 @@ mod tests {
         
         // Clear all KETHER_* env vars to test defaults
         remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_DB_PATH");
+        remove_env_var("KETHER_REGISTRY_PATH");
         remove_env_var("KETHER_BACKEND_API_URL");
         remove_env_var("KETHER_BACKEND_API_KEY");
         remove_env_var("KETHER_LOCAL_API_BIND");
@@ -181,7 +181,7 @@ mod tests {
         // This should fall back to defaults since config.toml doesn't exist
         let config = Config::load().unwrap();
         assert_eq!(config.l4d2_server_dir, PathBuf::from("/opt/l4d2/server"));
-        assert_eq!(config.registry_db_path, PathBuf::from("registry.db"));
+        assert_eq!(config.registry_path, PathBuf::from("registry.json"));
 
         // Restore original env var
         if let Some(val) = original_config {
@@ -194,7 +194,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let config_content = r#"
 l4d2_server_dir = "/custom/server/path"
-registry_db_path = "/custom/registry.db"
+registry_path = "/custom/registry.json"
 backend_api_url = "http://custom-api.example.com"
 backend_api_key = "test-key-123"
 local_api_bind = "0.0.0.0:9000"
@@ -209,7 +209,7 @@ log_level = "debug"
 
         // Clear env vars to test pure TOML loading
         remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_DB_PATH");
+        remove_env_var("KETHER_REGISTRY_PATH");
         remove_env_var("KETHER_BACKEND_API_URL");
         remove_env_var("KETHER_BACKEND_API_KEY");
         remove_env_var("KETHER_LOCAL_API_BIND");
@@ -218,7 +218,7 @@ log_level = "debug"
 
         let config = Config::load().unwrap();
         assert_eq!(config.l4d2_server_dir, PathBuf::from("/custom/server/path"));
-        assert_eq!(config.registry_db_path, PathBuf::from("/custom/registry.db"));
+        assert_eq!(config.registry_path, PathBuf::from("/custom/registry.json"));
         assert_eq!(config.backend_api_url, "http://custom-api.example.com");
         assert_eq!(config.backend_api_key, Some("test-key-123".to_string()));
         assert_eq!(config.local_api_bind, SocketAddr::from_str("0.0.0.0:9000").unwrap());
@@ -239,7 +239,7 @@ log_level = "debug"
         set_env_var("KETHER_L4D2_SERVER_DIR", "/env/server/path");
         
         remove_env_var("KETHER_CONFIG");
-        remove_env_var("KETHER_REGISTRY_DB_PATH");
+        remove_env_var("KETHER_REGISTRY_PATH");
         remove_env_var("KETHER_BACKEND_API_URL");
         remove_env_var("KETHER_BACKEND_API_KEY");
         remove_env_var("KETHER_LOCAL_API_BIND");
@@ -257,9 +257,9 @@ log_level = "debug"
     }
 
     #[test]
-    fn test_env_var_override_registry_db_path() {
-        let original = std::env::var("KETHER_REGISTRY_DB_PATH").ok();
-        set_env_var("KETHER_REGISTRY_DB_PATH", "/env/registry.db");
+    fn test_env_var_override_registry_path() {
+        let original = std::env::var("KETHER_REGISTRY_PATH").ok();
+        set_env_var("KETHER_REGISTRY_PATH", "/env/registry.json");
         
         remove_env_var("KETHER_CONFIG");
         remove_env_var("KETHER_L4D2_SERVER_DIR");
@@ -270,12 +270,12 @@ log_level = "debug"
         remove_env_var("KETHER_LOG_LEVEL");
 
         let config = Config::load().unwrap();
-        assert_eq!(config.registry_db_path, PathBuf::from("/env/registry.db"));
+        assert_eq!(config.registry_path, PathBuf::from("/env/registry.json"));
 
         if let Some(val) = original {
-            set_env_var("KETHER_REGISTRY_DB_PATH", &val);
+            set_env_var("KETHER_REGISTRY_PATH", &val);
         } else {
-            remove_env_var("KETHER_REGISTRY_DB_PATH");
+            remove_env_var("KETHER_REGISTRY_PATH");
         }
     }
 
@@ -286,7 +286,7 @@ log_level = "debug"
         
         remove_env_var("KETHER_CONFIG");
         remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_DB_PATH");
+        remove_env_var("KETHER_REGISTRY_PATH");
         remove_env_var("KETHER_BACKEND_API_KEY");
         remove_env_var("KETHER_LOCAL_API_BIND");
         remove_env_var("KETHER_SYNC_INTERVAL_SECS");
@@ -309,7 +309,7 @@ log_level = "debug"
         
         remove_env_var("KETHER_CONFIG");
         remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_DB_PATH");
+        remove_env_var("KETHER_REGISTRY_PATH");
         remove_env_var("KETHER_BACKEND_API_URL");
         remove_env_var("KETHER_LOCAL_API_BIND");
         remove_env_var("KETHER_SYNC_INTERVAL_SECS");
@@ -332,7 +332,7 @@ log_level = "debug"
         
         remove_env_var("KETHER_CONFIG");
         remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_DB_PATH");
+        remove_env_var("KETHER_REGISTRY_PATH");
         remove_env_var("KETHER_BACKEND_API_URL");
         remove_env_var("KETHER_BACKEND_API_KEY");
         remove_env_var("KETHER_SYNC_INTERVAL_SECS");
@@ -355,7 +355,7 @@ log_level = "debug"
         
         remove_env_var("KETHER_CONFIG");
         remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_DB_PATH");
+        remove_env_var("KETHER_REGISTRY_PATH");
         remove_env_var("KETHER_BACKEND_API_URL");
         remove_env_var("KETHER_BACKEND_API_KEY");
         remove_env_var("KETHER_LOCAL_API_BIND");
@@ -378,7 +378,7 @@ log_level = "debug"
         
         remove_env_var("KETHER_CONFIG");
         remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_DB_PATH");
+        remove_env_var("KETHER_REGISTRY_PATH");
         remove_env_var("KETHER_BACKEND_API_URL");
         remove_env_var("KETHER_BACKEND_API_KEY");
         remove_env_var("KETHER_LOCAL_API_BIND");

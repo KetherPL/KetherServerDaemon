@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 pub mod models;
 pub mod traits;
-pub mod sqlite;
+pub mod json_store;
 
 pub use models::{MapEntry, SourceKind};
 pub use traits::Registry;
-pub use sqlite::SqliteRegistry;
+pub use json_store::JsonRegistry;
 

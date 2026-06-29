@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use std::path::PathBuf;
-use crate::registry::SqliteRegistry;
+use crate::registry::JsonRegistry;
 use crate::config::Config;
 
-/// Create an in-memory SQLite database for testing
-pub async fn setup_test_database() -> anyhow::Result<SqliteRegistry> {
-    let db_path = PathBuf::from(":memory:");
-    SqliteRegistry::new(&db_path).await
+/// Create a JSON registry database for testing
+pub async fn setup_test_database() -> anyhow::Result<JsonRegistry> {
+    let registry_path = PathBuf::from(std::env::temp_dir()).join(format!(
+        "kether-test-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    JsonRegistry::new(&registry_path).await
 }
 
 /// Create a test configuration with temporary paths
@@ -18,7 +21,7 @@ pub fn create_test_config() -> Config {
     
     Config {
         l4d2_server_dir: temp_dir.clone(),
-        registry_db_path: temp_dir.join("test_registry.db"),
+        registry_path: temp_dir.join("registry.json"),
         backend_api_url: "http://localhost:3000/api".to_string(),
         backend_api_key: None,
         local_api_bind: SocketAddr::from_str("127.0.0.1:0").unwrap(), // Use port 0 to auto-assign
