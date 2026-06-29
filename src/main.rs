@@ -5,6 +5,7 @@ mod downloader;
 mod extractor;
 mod logging;
 mod map_installer;
+mod repl;
 mod registry;
 mod sync;
 mod utils;
@@ -24,6 +25,7 @@ use sync::{BackendSyncService, SyncService};
 use watcher::{InotifyWatcher, Watcher};
 use api::HttpServer;
 use map_installer::MapInstallationService;
+use repl::{DaemonCommand, start_key_listener};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -65,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
         .await?
     );
     info!("Map installation service initialized");
+
+    let (daemon_tx, mut daemon_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
     
     // Spawn tasks
     let installer_watcher = Arc::clone(&installer);
@@ -182,17 +186,34 @@ async fn main() -> anyhow::Result<()> {
             error!(error = %e, "HTTP server error");
         }
     });
+
+    let repl_tx = daemon_tx.clone();
+    let repl_task = tokio::spawn(async move {
+        if let Err(e) = start_key_listener(repl_tx).await {
+            error!(error = %e, "REPL key listener error");
+        }
+    });
     
     info!("All services started. Waiting for shutdown signal...");
     
     // Wait for shutdown signal
-    match signal::ctrl_c().await {
-        Ok(()) => {
-            info!("Received shutdown signal (Ctrl+C)");
-        }
-        Err(err) => {
-            error!(error = %err, "Unable to listen for shutdown signal");
-        }
+    tokio::select! {
+        res = signal::ctrl_c() => match res {
+            Ok(()) => {
+                info!("Received shutdown signal (Ctrl+C)");
+            }
+            Err(err) => {
+                error!(error = %err, "Unable to listen for shutdown signal");
+            }
+        },
+        cmd = daemon_rx.recv() => match cmd {
+            Some(DaemonCommand::Stop) => {
+                info!("Received stop command from REPL");
+            }
+            None => {
+                warn!("REPL command channel closed");
+            }
+        },
     }
     
     // Graceful shutdown
@@ -201,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
     watcher_task.abort();
     sync_task.abort();
     http_task.abort();
+    repl_task.abort();
     
     // Wait a bit for tasks to finish
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
