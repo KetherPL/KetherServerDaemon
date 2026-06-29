@@ -6,7 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use tokio::sync::mpsc;
 
-use crate::map_installer::MapInstallationService;
+use crate::map_installer::{DiscoveryReport, MapInstallationService};
 use crate::registry::{MapEntry, SourceKind};
 
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +67,9 @@ impl Repl {
                             "rm" | "remove" | "uninstall" => {
                                 self.handle_remove(&runtime_handle, args.first().copied());
                             }
+                            "scan" | "discover" | "d" => {
+                                self.handle_discover(&runtime_handle);
+                            }
                             "q" | "quit" | "exit" => {
                                 println!("Exiting REPL...");
                                 break;
@@ -118,6 +121,7 @@ impl Repl {
         println!("  ls, list, maps - List installed maps");
         println!("  i, install <url|workshop_id> [name] - Install a map");
         println!("  rm, remove, uninstall <id> - Remove map by ID");
+        println!("  scan, discover, d - Scan addons dir for unregistered maps");
         println!("  q, quit, exit - Exit the REPL");
         println!("  S, stop - Stop the daemon");
     }
@@ -213,6 +217,37 @@ impl Repl {
         match runtime_handle.block_on(installer.uninstall_map(map_id)) {
             Ok(()) => println!("Removed map #{map_id}."),
             Err(err) => eprintln!("Failed to remove map #{map_id}: {err}"),
+        }
+    }
+
+    fn handle_discover(&self, runtime_handle: &tokio::runtime::Handle) {
+        let Some(installer) = self.installer.as_ref() else {
+            eprintln!("Map installer unavailable.");
+            return;
+        };
+
+        match runtime_handle.block_on(installer.discover_maps()) {
+            Ok(report) => self.print_discovery_report(report),
+            Err(err) => {
+                eprintln!("Discovery failed: {err}");
+            }
+        }
+    }
+
+    fn print_discovery_report(&self, report: DiscoveryReport) {
+        println!(
+            "Discovery complete: {} added, {} already registered, {} failed.",
+            report.added.len(),
+            report.skipped,
+            report.failed
+        );
+        if report.added.is_empty() {
+            println!("No new maps found.");
+        } else {
+            println!("Newly registered maps:");
+            for map in report.added {
+                self.print_map_entry(&map);
+            }
         }
     }
 

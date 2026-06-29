@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::collections::HashSet;
 use anyhow::Context;
 use tracing::{info, warn};
 
@@ -16,6 +17,12 @@ pub struct MapInstallationService {
     vpk_extractor: VpkExtractor,
     addons_dir: PathBuf,
     temp_dir: PathBuf,
+}
+
+pub struct DiscoveryReport {
+    pub added: Vec<MapEntry>,
+    pub skipped: usize,
+    pub failed: usize,
 }
 
 impl MapInstallationService {
@@ -613,6 +620,54 @@ impl MapInstallationService {
         // Note: We no longer support detecting directories with .bsp files
         // since all maps should be VPK files in addons/ directory
         Ok(None)
+    }
+
+    /// Discover maps in addons_dir that are not yet registered.
+    pub async fn discover_maps(&self) -> anyhow::Result<DiscoveryReport> {
+        let existing_maps = self.registry.list_maps().await?;
+        let mut existing_paths: HashSet<String> = existing_maps
+            .into_iter()
+            .map(|map| map.installed_path)
+            .collect();
+
+        let vpk_files = self.find_vpk_files_in_extracted(self.addons_dir.clone()).await?;
+        let mut report = DiscoveryReport {
+            added: Vec::new(),
+            skipped: 0,
+            failed: 0,
+        };
+
+        for path in vpk_files {
+            let relative_path = match path.strip_prefix(&self.addons_dir) {
+                Ok(relative) => relative.to_string_lossy().to_string(),
+                Err(_) => {
+                    warn!(path = %path.display(), "Discovery skipped map outside addons directory");
+                    report.failed += 1;
+                    continue;
+                }
+            };
+
+            if existing_paths.contains(&relative_path) {
+                report.skipped += 1;
+                continue;
+            }
+
+            match self.detect_map_from_path(path).await {
+                Ok(Some(entry)) => {
+                    existing_paths.insert(entry.installed_path.clone());
+                    report.added.push(entry);
+                }
+                Ok(None) => {
+                    report.failed += 1;
+                }
+                Err(error) => {
+                    warn!(error = %error, "Discovery failed to register map");
+                    report.failed += 1;
+                }
+            }
+        }
+
+        Ok(report)
     }
     
     /// Get reference to registry (for sync task)
