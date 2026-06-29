@@ -111,7 +111,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            l4d2_server_dir: PathBuf::from("/opt/l4d2/server"),
+            l4d2_server_dir: PathBuf::from("/home/steam/l4d2"),
             registry_db_path: PathBuf::from("registry.db"),
             backend_api_url: String::from("http://localhost:3000/api"),
             backend_api_key: None,

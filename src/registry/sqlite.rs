@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
+use anyhow::Context;
 use async_trait::async_trait;
-use sqlx::{sqlite::SqlitePool, Row};
+use sqlx::{
+    Row,
+    sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions},
+};
 use std::path::PathBuf;
 use crate::registry::{models::{MapEntry, SourceKind}, traits::Registry};
 use tracing::{error, info, warn};
@@ -11,8 +15,26 @@ pub struct SqliteRegistry {
 
 impl SqliteRegistry {
     pub async fn new(db_path: &PathBuf) -> anyhow::Result<Self> {
-        let db_url = format!("sqlite:{}", db_path.display());
-        let pool = SqlitePool::connect(&db_url).await?;
+        let in_memory = db_path.as_os_str() == ":memory:";
+        if !in_memory
+            && let Some(parent) = db_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent).await.with_context(|| {
+                format!(
+                    "Failed to create parent directory for registry database: {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let options = SqliteConnectOptions::new()
+            .filename(db_path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .with_context(|| format!("Failed to open registry database at {}", db_path.display()))?;
         
         let registry = Self { pool };
         registry.init_schema().await?;
@@ -214,13 +236,29 @@ impl Registry for SqliteRegistry {
 mod tests {
 use super::*;
 use crate::registry::models;
-use tempfile::NamedTempFile;
 use chrono::Utc;
+use tempfile::TempDir;
 
     async fn setup_test_registry() -> SqliteRegistry {
-        let temp_file = NamedTempFile::new().unwrap();
-        let db_path = temp_file.path().to_path_buf();
-        SqliteRegistry::new(&db_path).await.unwrap()
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_registry.db");
+        let registry = SqliteRegistry::new(&db_path).await.unwrap();
+        std::mem::forget(temp_dir);
+        registry
+    }
+
+    #[tokio::test]
+    async fn test_new_creates_missing_parent_and_database_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("nested").join("registry.db");
+
+        assert!(!db_path.exists());
+
+        let registry = SqliteRegistry::new(&db_path).await.unwrap();
+
+        assert!(db_path.exists());
+        let maps = registry.list_maps().await.unwrap();
+        assert!(maps.is_empty());
     }
 
     fn create_test_map_entry(id: u64) -> MapEntry {
@@ -312,7 +350,7 @@ use chrono::Utc;
     #[tokio::test]
     async fn test_remove_map() {
         let registry = setup_test_registry().await;
-        let mut entry = create_test_map_entry(0);
+        let entry = create_test_map_entry(0);
         let assigned_id = registry.add_map(entry).await.unwrap();
         
         // Verify it exists
@@ -343,9 +381,9 @@ use chrono::Utc;
     #[tokio::test]
     async fn test_list_maps_multiple() {
         let registry = setup_test_registry().await;
-        let mut entry1 = create_test_map_entry(0);
-        let mut entry2 = create_test_map_entry(0);
-        let mut entry3 = MapEntry {
+        let entry1 = create_test_map_entry(0);
+        let entry2 = create_test_map_entry(0);
+        let entry3 = MapEntry {
             id: 0, // Will be assigned by database
             name: "Test Map 7".to_string(),
             source_url: "https://example.com/map7.zip".to_string(),
@@ -393,8 +431,8 @@ use chrono::Utc;
     #[tokio::test]
     async fn test_auto_increment_ids() {
         let registry = setup_test_registry().await;
-        let mut entry1 = create_test_map_entry(0);
-        let mut entry2 = create_test_map_entry(0);
+        let entry1 = create_test_map_entry(0);
+        let entry2 = create_test_map_entry(0);
         
         let id1 = registry.add_map(entry1.clone()).await.unwrap();
         let id2 = registry.add_map(entry2.clone()).await.unwrap();

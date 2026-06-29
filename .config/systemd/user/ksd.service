@@ -1,0 +1,10 @@
+[Service]
+Type=forking
+Restart=on-failure
+TimeoutSec=1min
+IgnoreSIGPIPE=no
+GuessMainPID=yes
+RemainAfterExit=no
+WorkingDirectory=%h/Kether_Server_Daemon
+Description=Kether Server Daemon
+ExecStart=screen -d -m -S Kether_Server_Daemon ./KetherServerDaemon

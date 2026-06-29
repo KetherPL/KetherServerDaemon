@@ -188,8 +188,9 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let repl_tx = daemon_tx.clone();
+    let repl_installer = Arc::clone(&installer);
     let repl_task = tokio::spawn(async move {
-        if let Err(e) = start_key_listener(repl_tx).await {
+        if let Err(e) = start_key_listener(repl_tx, repl_installer).await {
             error!(error = %e, "REPL key listener error");
         }
     });
