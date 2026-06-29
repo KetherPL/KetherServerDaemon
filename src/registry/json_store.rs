@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::Context;
@@ -8,6 +9,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
+use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::registry::{
@@ -46,6 +48,7 @@ impl Serialize for NumericOrderedSnapshot<'_> {
 pub struct JsonRegistry {
     inner: Arc<RwLock<HashMap<u64, MapData>>>,
     path: PathBuf,
+    save_lock: Mutex<()>,
 }
 
 impl JsonRegistry {
@@ -70,10 +73,11 @@ impl JsonRegistry {
         let registry = Self {
             inner: Arc::new(RwLock::new(map)),
             path: path.clone(),
+            save_lock: Mutex::new(()),
         };
 
         if !path.exists() {
-            registry.save_current_state().await?;
+            registry.persist().await?;
         }
 
         Ok(registry)
@@ -102,7 +106,8 @@ impl JsonRegistry {
         Ok(parsed)
     }
 
-    async fn save_current_state(&self) -> anyhow::Result<()> {
+    async fn persist(&self) -> anyhow::Result<()> {
+        let _guard = self.save_lock.lock().await;
         let snapshot = {
             let state = self
                 .inner
@@ -114,6 +119,8 @@ impl JsonRegistry {
     }
 
     async fn save_snapshot(path: &PathBuf, snapshot: &HashMap<u64, MapData>) -> anyhow::Result<()> {
+        static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
         let mut entries: Vec<(u64, &MapData)> =
             snapshot.iter().map(|(id, data)| (*id, data)).collect();
         entries.sort_by_key(|(id, _)| *id);
@@ -121,7 +128,8 @@ impl JsonRegistry {
         let json = serde_json::to_string_pretty(&NumericOrderedSnapshot(&entries))
             .with_context(|| format!("Failed to serialize registry JSON for {}", path.display()))?;
 
-        let temp_path = path.with_extension("tmp");
+        let temp_suffix = format!("tmp.{}", TEMP_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let temp_path = path.with_extension(temp_suffix);
         tokio::fs::write(&temp_path, json)
             .await
             .with_context(|| format!("Failed to write temp registry file {}", temp_path.display()))?;
@@ -178,7 +186,7 @@ impl JsonRegistry {
 #[async_trait]
 impl Registry for JsonRegistry {
     async fn add_map(&self, mut entry: MapEntry) -> anyhow::Result<u64> {
-        let (id, snapshot) = {
+        let id = {
             let mut state = self
                 .inner
                 .write()
@@ -186,27 +194,28 @@ impl Registry for JsonRegistry {
             let id = state.keys().max().copied().unwrap_or(0) + 1;
             entry.id = id;
             state.insert(id, Self::map_data_from_entry(entry));
-            (id, state.clone())
+            id
         };
 
-        Self::save_snapshot(&self.path, &snapshot).await?;
+        self.persist().await?;
         info!(map_id = id, "Added map to JSON registry");
         Ok(id)
     }
 
     async fn remove_map(&self, id: u64) -> anyhow::Result<()> {
-        let snapshot = {
+        let removed = {
             let mut state = self
                 .inner
                 .write()
                 .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
-            if state.remove(&id).is_none() {
-                return Ok(());
-            }
-            state.clone()
+            state.remove(&id).is_some()
         };
 
-        Self::save_snapshot(&self.path, &snapshot).await?;
+        if !removed {
+            return Ok(());
+        }
+
+        self.persist().await?;
         info!(map_id = id, "Removed map from JSON registry");
         Ok(())
     }
@@ -236,7 +245,7 @@ impl Registry for JsonRegistry {
     }
 
     async fn update_map(&self, entry: MapEntry) -> anyhow::Result<()> {
-        let snapshot = {
+        let updated = {
             let mut state = self
                 .inner
                 .write()
@@ -246,15 +255,17 @@ impl Registry for JsonRegistry {
             }
             let id = entry.id;
             state.insert(id, Self::map_data_from_entry(entry));
-            state.clone()
+            true
         };
 
-        Self::save_snapshot(&self.path, &snapshot).await?;
+        if updated {
+            self.persist().await?;
+        }
         Ok(())
     }
 
     async fn replace_all_maps(&self, entries: Vec<MapEntry>) -> anyhow::Result<()> {
-        let snapshot = {
+        {
             let mut state = self
                 .inner
                 .write()
@@ -264,11 +275,11 @@ impl Registry for JsonRegistry {
                 let id = entry.id;
                 state.insert(id, Self::map_data_from_entry(entry));
             }
-            state.clone()
-        };
+        }
 
-        Self::save_snapshot(&self.path, &snapshot).await?;
-        info!(count = snapshot.len(), "Replaced all maps in JSON registry");
+        self.persist().await?;
+        let count = self.list_maps().await?.len();
+        info!(count, "Replaced all maps in JSON registry");
         Ok(())
     }
 }
@@ -276,6 +287,7 @@ impl Registry for JsonRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn create_test_map_entry(id: u64) -> MapEntry {
@@ -539,5 +551,47 @@ mod tests {
             key_two < key_ten,
             "key \"2\" should appear before key \"10\" in numeric order"
         );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_writes_persist_all_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("registry.json");
+        let registry = Arc::new(JsonRegistry::new(&path).await.unwrap());
+
+        let mut handles = Vec::new();
+        for i in 0..50 {
+            let reg = Arc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                let entry = MapEntry {
+                    id: 0,
+                    name: format!("Map {i}"),
+                    source_url: format!("https://example.com/{i}"),
+                    source_kind: SourceKind::Other,
+                    workshop_id: None,
+                    installed_path: format!("map_{i}.vpk"),
+                    installed_at: Utc::now(),
+                    version: None,
+                    checksum: None,
+                    checksum_kind: None,
+                };
+                reg.add_map(entry).await.unwrap()
+            }));
+        }
+
+        let mut ids = Vec::new();
+        for handle in handles {
+            ids.push(handle.await.unwrap());
+        }
+        assert_eq!(ids.len(), 50);
+
+        let memory_maps = registry.list_maps().await.unwrap();
+        assert_eq!(memory_maps.len(), 50);
+
+        let reloaded = JsonRegistry::new(&path).await.unwrap();
+        let disk_maps = reloaded.list_maps().await.unwrap();
+        assert_eq!(disk_maps.len(), 50);
+        let unique_ids: std::collections::HashSet<u64> = disk_maps.iter().map(|m| m.id).collect();
+        assert_eq!(unique_ids.len(), 50);
     }
 }

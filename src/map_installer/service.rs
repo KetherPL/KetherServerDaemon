@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::collections::HashMap;
 use anyhow::Context;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::downloader::{workshop::WorkshopDownloader, zip::ZipDownloader, traits::Downloader};
@@ -17,6 +18,7 @@ pub struct MapInstallationService {
     vpk_extractor: VpkExtractor,
     addons_dir: PathBuf,
     temp_dir: PathBuf,
+    op_lock: Mutex<()>,
 }
 
 pub struct DiscoveryReport {
@@ -52,6 +54,7 @@ impl MapInstallationService {
             vpk_extractor: VpkExtractor::new(),
             addons_dir,
             temp_dir,
+            op_lock: Mutex::new(()),
         })
     }
     
@@ -207,30 +210,38 @@ impl MapInstallationService {
         
         // Place VPK file directly in addons/ directory
         let install_path = self.addons_dir.join(&vpk_filename);
-        
-        // Ensure addons directory exists
+
         tokio::fs::create_dir_all(&self.addons_dir).await?;
-        
+
+        let _guard = self.op_lock.lock().await;
+
+        if let Some(existing) = self.find_map_by_installed_path(&vpk_filename).await? {
+            if let Err(e) = tokio::fs::remove_file(&vpk_path).await {
+                warn!(error = %e, path = %vpk_path.display(), "Failed to clean up downloaded file");
+            }
+            return Ok(existing);
+        }
+
         // Copy VPK file to addons directory
         tokio::fs::copy(&vpk_path, &install_path).await?;
         info!(source = %vpk_path.display(), dest = %install_path.display(), "Copied VPK file");
-        
+
         // Calculate MD5 checksum
         let checksum = crate::utils::calculate_file_md5(&install_path).await.ok();
         let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
-        
+
         // Determine source URL
         let source_url = match source_kind {
             SourceKind::Workshop => "".to_string(), // Empty for workshop maps
             _ => source_url.unwrap_or_else(|| format!("file:{}", vpk_filename)),
         };
-        
+
         // Ensure workshop_id is only set when source_kind is Workshop
         let workshop_id = match source_kind {
             SourceKind::Workshop => workshop_id,
             SourceKind::SirPlease | SourceKind::Other => None,
         };
-        
+
         // Create map entry with relative path (ID will be assigned by database)
         let mut map_entry = MapEntry {
             id: 0, // Temporary, will be replaced by database-assigned ID
@@ -244,7 +255,7 @@ impl MapInstallationService {
             checksum,
             checksum_kind,
         };
-        
+
         // Register in database and get assigned ID
         let assigned_id = match self.registry.add_map(map_entry.clone()).await {
             Ok(id) => id,
@@ -254,7 +265,9 @@ impl MapInstallationService {
                 return Err(e);
             }
         };
-        
+
+        drop(_guard);
+
         // Update map entry with assigned ID
         map_entry.id = assigned_id;
         
@@ -328,22 +341,31 @@ impl MapInstallationService {
             format!("{}.vpk", vpk_filename)
         };
         
-        // Ensure addons directory exists
-        tokio::fs::create_dir_all(&self.addons_dir).await?;
-        
         // Place VPK file directly in addons/ directory
         let install_path = self.addons_dir.join(&vpk_filename);
-        
+
+        tokio::fs::create_dir_all(&self.addons_dir).await?;
+
+        let _guard = self.op_lock.lock().await;
+
+        if let Some(existing) = self.find_map_by_installed_path(&vpk_filename).await? {
+            let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+            if let Err(e) = tokio::fs::remove_file(&zip_path).await {
+                warn!(error = %e, path = %zip_path.display(), "Failed to clean up downloaded ZIP");
+            }
+            return Ok(existing);
+        }
+
         // Copy VPK file to addons directory
         tokio::fs::copy(&source_vpk_path, &install_path).await
             .context("Failed to copy VPK file to addons directory")?;
-        
+
         info!(source = %source_vpk_path.display(), dest = %install_path.display(), "Copied VPK file from ZIP");
-        
+
         // Calculate MD5 checksum
         let checksum = crate::utils::calculate_file_md5(&install_path).await.ok();
         let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
-        
+
         // Determine source URL
         let source_url = source_url.unwrap_or_else(|| {
             zip_path.file_name()
@@ -351,13 +373,13 @@ impl MapInstallationService {
                 .map(|n| format!("zip:{}", n))
                 .unwrap_or_else(|| "zip:unknown".to_string())
         });
-        
+
         // Ensure workshop_id is only set when source_kind is Workshop
         let workshop_id = match source_kind {
             SourceKind::Workshop => workshop_id,
             SourceKind::SirPlease | SourceKind::Other => None,
         };
-        
+
         // Create map entry with relative path (ID will be assigned by database)
         let mut map_entry = MapEntry {
             id: 0, // Temporary, will be replaced by database-assigned ID
@@ -371,7 +393,7 @@ impl MapInstallationService {
             checksum,
             checksum_kind,
         };
-        
+
         // Register in database and get assigned ID
         let assigned_id = match self.registry.add_map(map_entry.clone()).await {
             Ok(id) => id,
@@ -381,7 +403,9 @@ impl MapInstallationService {
                 return Err(e);
             }
         };
-        
+
+        drop(_guard);
+
         // Update map entry with assigned ID
         map_entry.id = assigned_id;
         
@@ -553,19 +577,21 @@ impl MapInstallationService {
     
     /// Uninstall a map
     pub async fn uninstall_map(&self, map_id: u64) -> anyhow::Result<()> {
+        let _guard = self.op_lock.lock().await;
+
         info!(map_id = map_id, "Uninstalling map");
-        
+
         // Get map entry from registry
         let map_entry = self.registry.get_map(map_id).await?
             .ok_or_else(|| anyhow::anyhow!("Map not found: {}", map_id))?;
-        
+
         // Construct absolute path from relative path
         let installed_path_abs = self.addons_dir.join(&map_entry.installed_path);
-        
+
         // Validate that the constructed path is within addons directory (prevent path traversal)
         crate::utils::validate_path_within_base_new(&installed_path_abs, &self.addons_dir)
             .context("Attempted to uninstall map outside of addons directory - potential path traversal detected!")?;
-        
+
         // Remove files
         if installed_path_abs.exists() {
             if installed_path_abs.is_file() {
@@ -577,12 +603,99 @@ impl MapInstallationService {
             }
             info!(path = %installed_path_abs.display(), "Removed map files");
         }
-        
+
         // Remove from registry
         self.registry.remove_map(map_id).await?;
-        
+
         info!(map_id = map_id, "Map uninstalled successfully");
         Ok(())
+    }
+
+    async fn find_map_by_installed_path(
+        &self,
+        relative_path: &str,
+    ) -> anyhow::Result<Option<MapEntry>> {
+        let maps = self.registry.list_maps().await?;
+        Ok(maps
+            .into_iter()
+            .find(|m| m.installed_path == relative_path))
+    }
+
+    async fn register_new_map(
+        &self,
+        path: &Path,
+        relative_path: &str,
+    ) -> anyhow::Result<Option<MapEntry>> {
+        if path.extension().and_then(|e| e.to_str()) != Some("vpk") {
+            return Ok(None);
+        }
+
+        if let Some(existing) = self.find_map_by_installed_path(relative_path).await? {
+            return Ok(Some(existing));
+        }
+
+        let Some(mut map_entry) = self.build_map_entry_from_file(path, relative_path).await? else {
+            return Ok(None);
+        };
+
+        let assigned_id = self.registry.add_map(map_entry.clone()).await?;
+        map_entry.id = assigned_id;
+        Ok(Some(map_entry))
+    }
+
+    /// Sync a map file with the registry: register new VPKs or refresh changed checksums.
+    pub async fn sync_map_from_path(&self, path: PathBuf) -> anyhow::Result<Option<MapEntry>> {
+        let _guard = self.op_lock.lock().await;
+
+        let relative_path = match path.strip_prefix(&self.addons_dir) {
+            Ok(rel) => rel.to_string_lossy().to_string(),
+            Err(_) => return Ok(None),
+        };
+
+        if path.extension().and_then(|e| e.to_str()) != Some("vpk") {
+            return Ok(None);
+        }
+
+        if let Some(existing) = self.find_map_by_installed_path(&relative_path).await? {
+            let Some(mut fresh_entry) = self.build_map_entry_from_file(&path, &relative_path).await?
+            else {
+                return Ok(Some(existing));
+            };
+
+            if fresh_entry.checksum != existing.checksum {
+                fresh_entry.id = existing.id;
+                Self::preserve_source_identity(&mut fresh_entry, &existing);
+                self.registry.update_map(fresh_entry.clone()).await?;
+                return Ok(Some(fresh_entry));
+            }
+
+            return Ok(Some(existing));
+        }
+
+        self.register_new_map(&path, &relative_path).await
+    }
+
+    /// Remove a registry entry when its map file was deleted from disk.
+    pub async fn remove_map_by_path(&self, path: PathBuf) -> anyhow::Result<Option<u64>> {
+        let _guard = self.op_lock.lock().await;
+
+        let relative_path = match path.strip_prefix(&self.addons_dir) {
+            Ok(rel) => rel.to_string_lossy().to_string(),
+            Err(_) => return Ok(None),
+        };
+
+        let abs = self.addons_dir.join(&relative_path);
+        if tokio::fs::metadata(&abs).await.is_ok() {
+            return Ok(None);
+        }
+
+        if let Some(existing) = self.find_map_by_installed_path(&relative_path).await? {
+            let id = existing.id;
+            self.registry.remove_map(id).await?;
+            return Ok(Some(id));
+        }
+
+        Ok(None)
     }
 
     async fn file_modified_time(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -647,40 +760,19 @@ impl MapInstallationService {
 
     /// Detect map from filesystem path (for watcher)
     pub async fn detect_map_from_path(&self, path: PathBuf) -> anyhow::Result<Option<MapEntry>> {
-        // Convert absolute path to relative path (if it's within addons_dir)
         let relative_path = match path.strip_prefix(&self.addons_dir) {
             Ok(rel) => rel.to_string_lossy().to_string(),
-            Err(_) => {
-                // Path is not within addons_dir, skip it
-                return Ok(None);
-            }
+            Err(_) => return Ok(None),
         };
-        
-        // Check if it's a VPK file
-        if path.extension().and_then(|e| e.to_str()) == Some("vpk") {
-            // Check if already registered (compare by relative path)
-            let maps = self.registry.list_maps().await?;
-            if let Some(existing) = maps.iter().find(|m| m.installed_path == relative_path) {
-                return Ok(Some(existing.clone()));
-            }
 
-            let Some(mut map_entry) = self.build_map_entry_from_file(&path, &relative_path).await? else {
-                return Ok(None);
-            };
-
-            // Register in database and get assigned ID
-            let assigned_id = self.registry.add_map(map_entry.clone()).await?;
-            map_entry.id = assigned_id;
-            return Ok(Some(map_entry));
-        }
-        
-        // Note: We no longer support detecting directories with .bsp files
-        // since all maps should be VPK files in addons/ directory
-        Ok(None)
+        let _guard = self.op_lock.lock().await;
+        self.register_new_map(&path, &relative_path).await
     }
 
     /// Discover maps in addons_dir and optionally update existing records.
     pub async fn discover_maps(&self, mode: DiscoveryMode) -> anyhow::Result<DiscoveryReport> {
+        let _guard = self.op_lock.lock().await;
+
         let existing_maps = self.registry.list_maps().await?;
         let mut existing_by_path: HashMap<String, MapEntry> = existing_maps
             .into_iter()
@@ -743,7 +835,7 @@ impl MapInstallationService {
                     }
                 }
             } else {
-                match self.detect_map_from_path(path).await {
+                match self.register_new_map(&path, &relative_path).await {
                     Ok(Some(entry)) => {
                         existing_by_path.insert(entry.installed_path.clone(), entry.clone());
                         report.added.push(entry);
@@ -1294,6 +1386,125 @@ mod tests {
             fresh.source_url,
             "https://steamcommunity.com/sharedfiles/filedetails/?id=999"
         );
+    }
+
+    #[tokio::test]
+    async fn test_detect_map_from_path_is_idempotent_for_installed_path() {
+        let (service, addons_dir, registry) = setup_test_service().await;
+        tokio::fs::write(addons_dir.path().join("alpha.vpk"), b"vpk")
+            .await
+            .unwrap();
+
+        let id = registry
+            .add_map(MapEntry {
+                id: 0,
+                name: "Alpha".to_string(),
+                source_url: "https://example.com/alpha".to_string(),
+                source_kind: SourceKind::Other,
+                workshop_id: None,
+                installed_path: "alpha.vpk".to_string(),
+                installed_at: chrono::Utc::now(),
+                version: None,
+                checksum: None,
+                checksum_kind: None,
+            })
+            .await
+            .unwrap();
+
+        let path = addons_dir.path().join("alpha.vpk");
+        let result = service.detect_map_from_path(path).await.unwrap().unwrap();
+        assert_eq!(result.id, id);
+        assert_eq!(registry.list_maps().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sync_map_from_path_returns_existing_when_metadata_unavailable() {
+        let (service, addons_dir, registry) = setup_test_service().await;
+        tokio::fs::write(addons_dir.path().join("alpha.vpk"), b"vpk")
+            .await
+            .unwrap();
+
+        let id = registry
+            .add_map(MapEntry {
+                id: 0,
+                name: "Alpha".to_string(),
+                source_url: "https://example.com/alpha".to_string(),
+                source_kind: SourceKind::Other,
+                workshop_id: None,
+                installed_path: "alpha.vpk".to_string(),
+                installed_at: chrono::Utc::now(),
+                version: None,
+                checksum: Some("old".to_string()),
+                checksum_kind: Some("md5".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let result = service
+            .sync_map_from_path(addons_dir.path().join("alpha.vpk"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.id, id);
+        assert_eq!(registry.list_maps().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_remove_map_by_path_prunes_when_file_gone() {
+        let (service, addons_dir, registry) = setup_test_service().await;
+        let id = registry
+            .add_map(MapEntry {
+                id: 0,
+                name: "Gone".to_string(),
+                source_url: "https://example.com/gone".to_string(),
+                source_kind: SourceKind::Other,
+                workshop_id: None,
+                installed_path: "gone.vpk".to_string(),
+                installed_at: chrono::Utc::now(),
+                version: None,
+                checksum: None,
+                checksum_kind: None,
+            })
+            .await
+            .unwrap();
+
+        let removed = service
+            .remove_map_by_path(addons_dir.path().join("gone.vpk"))
+            .await
+            .unwrap();
+        assert_eq!(removed, Some(id));
+        assert!(registry.get_map(id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_remove_map_by_path_noop_when_file_exists() {
+        let (service, addons_dir, registry) = setup_test_service().await;
+        tokio::fs::write(addons_dir.path().join("exists.vpk"), b"vpk")
+            .await
+            .unwrap();
+
+        let id = registry
+            .add_map(MapEntry {
+                id: 0,
+                name: "Exists".to_string(),
+                source_url: "https://example.com/exists".to_string(),
+                source_kind: SourceKind::Other,
+                workshop_id: None,
+                installed_path: "exists.vpk".to_string(),
+                installed_at: chrono::Utc::now(),
+                version: None,
+                checksum: None,
+                checksum_kind: None,
+            })
+            .await
+            .unwrap();
+
+        let removed = service
+            .remove_map_by_path(addons_dir.path().join("exists.vpk"))
+            .await
+            .unwrap();
+        assert_eq!(removed, None);
+        assert!(registry.get_map(id).await.unwrap().is_some());
     }
 }
 

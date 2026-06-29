@@ -14,7 +14,10 @@ mod watcher;
 #[cfg(test)]
 mod test_helpers;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::signal;
 use tracing::{error, info, warn};
 
@@ -75,22 +78,57 @@ async fn main() -> anyhow::Result<()> {
     let watcher_task = tokio::spawn(async move {
         info!("Watcher task started");
         let mut receiver = watcher_events;
-        while let Some(event) = receiver.recv().await {
-            match event {
-                watcher::WatcherEvent::Create(path) => {
-                    info!(path = %path.display(), "File created in addons directory");
-                    // Detect new map installations
-                    if let Err(e) = installer_watcher.detect_map_from_path(path).await {
-                        warn!(error = %e, "Failed to detect map from path");
+        let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+        let debounce_window = Duration::from_secs(1);
+        let mut poll_tick = tokio::time::interval(Duration::from_millis(250));
+
+        loop {
+            tokio::select! {
+                event = receiver.recv() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+
+                    match event {
+                        watcher::WatcherEvent::Create(path) => {
+                            info!(path = %path.display(), "File created in addons directory");
+                            if path.extension().and_then(|e| e.to_str()) == Some("vpk") {
+                                pending.insert(path, Instant::now() + debounce_window);
+                            }
+                        }
+                        watcher::WatcherEvent::Modify(path) => {
+                            info!(path = %path.display(), "File modified in addons directory");
+                            if path.extension().and_then(|e| e.to_str()) == Some("vpk") {
+                                pending.insert(path, Instant::now() + debounce_window);
+                            }
+                        }
+                        watcher::WatcherEvent::Remove(path) => {
+                            info!(path = %path.display(), "File removed from addons directory");
+                            pending.remove(&path);
+                            if let Err(e) = installer_watcher.remove_map_by_path(path).await {
+                                warn!(error = %e, "Failed to remove map from registry after file deletion");
+                            }
+                        }
                     }
                 }
-                watcher::WatcherEvent::Remove(path) => {
-                    info!(path = %path.display(), "File removed from addons directory");
-                    // Map removal is handled by explicit uninstall - filesystem watcher
-                    // may detect manual deletions, but we don't auto-remove from registry
-                }
-                watcher::WatcherEvent::Modify(path) => {
-                    info!(path = %path.display(), "File modified in addons directory");
+                _ = poll_tick.tick() => {
+                    let now = Instant::now();
+                    let ready: Vec<PathBuf> = pending
+                        .iter()
+                        .filter(|(_, deadline)| **deadline <= now)
+                        .map(|(path, _)| path.clone())
+                        .collect();
+
+                    for path in ready {
+                        if !utils::file_is_stable(&path).await {
+                            continue;
+                        }
+
+                        pending.remove(&path);
+                        if let Err(e) = installer_watcher.sync_map_from_path(path.clone()).await {
+                            warn!(error = %e, path = %path.display(), "Failed to sync map from path");
+                        }
+                    }
                 }
             }
         }
