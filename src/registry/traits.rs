@@ -19,5 +19,8 @@ pub trait Registry: Send + Sync {
     
     /// Update an existing map entry
     async fn update_map(&self, entry: MapEntry) -> anyhow::Result<()>;
+
+    /// Replace the entire registry contents with the provided entries
+    async fn replace_all_maps(&self, entries: Vec<MapEntry>) -> anyhow::Result<()>;
 }
 

@@ -6,7 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use tokio::sync::mpsc;
 
-use crate::map_installer::{DiscoveryMode, DiscoveryReport, MapInstallationService};
+use crate::map_installer::{CompactReport, DiscoveryMode, DiscoveryReport, MapInstallationService};
 use crate::registry::{MapEntry, SourceKind};
 
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +70,9 @@ impl Repl {
                             "scan" | "discover" | "d" => {
                                 self.handle_discover(&runtime_handle, &args);
                             }
+                            "compact" => {
+                                self.handle_compact(&runtime_handle);
+                            }
                             "q" | "quit" | "exit" => {
                                 println!("Exiting REPL...");
                                 break;
@@ -122,6 +125,7 @@ impl Repl {
         println!("  i, install <url|workshop_id> [name] - Install a map");
         println!("  rm, remove, uninstall <id> - Remove map by ID");
         println!("  scan, discover, d [u|U] - Scan addons dir; u=update changed, U=force update all");
+        println!("  compact - Remove orphaned records, sort by name, reindex IDs from 1");
         println!("  q, quit, exit - Exit the REPL");
         println!("  S, stop - Stop the daemon");
     }
@@ -242,6 +246,44 @@ impl Repl {
             Ok(report) => self.print_discovery_report(report),
             Err(err) => {
                 eprintln!("Discovery failed: {err}");
+            }
+        }
+    }
+
+    fn handle_compact(&self, runtime_handle: &tokio::runtime::Handle) {
+        let Some(installer) = self.installer.as_ref() else {
+            eprintln!("Map installer unavailable.");
+            return;
+        };
+
+        match runtime_handle.block_on(installer.compact_registry()) {
+            Ok(report) => self.print_compact_report(report),
+            Err(err) => {
+                eprintln!("Compact failed: {err}");
+            }
+        }
+    }
+
+    fn print_compact_report(&self, report: CompactReport) {
+        let kept_count = report.kept.len();
+        let id_range = if kept_count == 0 {
+            "none".to_string()
+        } else if kept_count == 1 {
+            "1".to_string()
+        } else {
+            format!("1–{kept_count}")
+        };
+
+        println!(
+            "Compact complete: {} orphaned record(s) removed, {} map(s) reindexed (IDs {id_range}).",
+            report.removed.len(),
+            kept_count
+        );
+
+        if !report.removed.is_empty() {
+            println!("Removed orphaned records:");
+            for map in &report.removed {
+                self.print_map_entry(map);
             }
         }
     }

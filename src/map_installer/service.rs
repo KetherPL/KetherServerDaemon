@@ -26,6 +26,11 @@ pub struct DiscoveryReport {
     pub failed: usize,
 }
 
+pub struct CompactReport {
+    pub removed: Vec<MapEntry>,
+    pub kept: Vec<MapEntry>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryMode {
     Add,
@@ -742,6 +747,65 @@ impl MapInstallationService {
 
         Ok(report)
     }
+
+    /// Prune registry records whose map files are missing, sort survivors by name,
+    /// and reassign sequential IDs starting at 1. Does not delete any files.
+    pub async fn compact_registry(&self) -> anyhow::Result<CompactReport> {
+        info!("Compacting map registry");
+
+        let maps = self.registry.list_maps().await?;
+        let mut removed = Vec::new();
+        let mut survivors = Vec::new();
+
+        for entry in maps {
+            let installed_path_abs = self.addons_dir.join(&entry.installed_path);
+            let exists = match crate::utils::validate_path_within_base_new(
+                &installed_path_abs,
+                &self.addons_dir,
+            ) {
+                Ok(()) => tokio::fs::metadata(&installed_path_abs).await.is_ok(),
+                Err(error) => {
+                    warn!(
+                        map_id = entry.id,
+                        path = %entry.installed_path,
+                        error = %error,
+                        "Compact skipped map with invalid installed path"
+                    );
+                    false
+                }
+            };
+
+            if exists {
+                survivors.push(entry);
+            } else {
+                removed.push(entry);
+            }
+        }
+
+        survivors.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.installed_path.cmp(&b.installed_path))
+        });
+
+        for (index, entry) in survivors.iter_mut().enumerate() {
+            entry.id = (index + 1) as u64;
+        }
+
+        self.registry.replace_all_maps(survivors.clone()).await?;
+
+        info!(
+            removed = removed.len(),
+            kept = survivors.len(),
+            "Registry compact complete"
+        );
+
+        Ok(CompactReport {
+            removed,
+            kept: survivors,
+        })
+    }
     
     /// Get reference to registry (for sync task)
     pub fn registry(&self) -> &Arc<dyn Registry> {
@@ -931,6 +995,74 @@ mod tests {
         }
         
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_compact_registry_prunes_sorts_and_reindexes() {
+        let (service, addons_dir, registry) = setup_test_service().await;
+
+        tokio::fs::write(addons_dir.path().join("alpha.vpk"), b"vpk").await.unwrap();
+        tokio::fs::write(addons_dir.path().join("zulu.vpk"), b"vpk").await.unwrap();
+
+        let now = chrono::Utc::now();
+        registry
+            .replace_all_maps(vec![
+                MapEntry {
+                    id: 5,
+                    name: "Zulu".to_string(),
+                    source_url: "https://example.com/zulu".to_string(),
+                    source_kind: SourceKind::Other,
+                    workshop_id: None,
+                    installed_path: "zulu.vpk".to_string(),
+                    installed_at: now,
+                    version: None,
+                    checksum: None,
+                    checksum_kind: None,
+                },
+                MapEntry {
+                    id: 12,
+                    name: "Alpha".to_string(),
+                    source_url: "https://example.com/alpha".to_string(),
+                    source_kind: SourceKind::Other,
+                    workshop_id: None,
+                    installed_path: "alpha.vpk".to_string(),
+                    installed_at: now,
+                    version: None,
+                    checksum: None,
+                    checksum_kind: None,
+                },
+                MapEntry {
+                    id: 3,
+                    name: "Missing".to_string(),
+                    source_url: "https://example.com/missing".to_string(),
+                    source_kind: SourceKind::Other,
+                    workshop_id: None,
+                    installed_path: "missing.vpk".to_string(),
+                    installed_at: now,
+                    version: None,
+                    checksum: None,
+                    checksum_kind: None,
+                },
+            ])
+            .await
+            .unwrap();
+
+        let report = service.compact_registry().await.unwrap();
+
+        assert_eq!(report.removed.len(), 1);
+        assert_eq!(report.removed[0].name, "Missing");
+        assert_eq!(report.kept.len(), 2);
+        assert_eq!(report.kept[0].name, "Alpha");
+        assert_eq!(report.kept[0].id, 1);
+        assert_eq!(report.kept[1].name, "Zulu");
+        assert_eq!(report.kept[1].id, 2);
+
+        let maps = registry.list_maps().await.unwrap();
+        assert_eq!(maps.len(), 2);
+        assert_eq!(maps[0].id, 1);
+        assert_eq!(maps[0].name, "Alpha");
+        assert_eq!(maps[1].id, 2);
+        assert_eq!(maps[1].name, "Zulu");
     }
 }
 
