@@ -11,34 +11,34 @@ rust-version = "1.88"
 sourcepak = { version = "0.3.0", features = ["mem-map"] }
 
 # Async runtime
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.x", features = ["full"] }
 reedline = "0.46"
 crossterm = "0.29"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 
 # HTTP server
-axum = { version = "0.7", features = ["json"] }
+axum = { version = "0.8", features = ["json"] }
 
 # SQLite
-sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "sqlite", "chrono"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-native-tls", "sqlite", "chrono"] }
 
 # Configuration
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1.x", features = ["derive"] }
+serde_json = "1.x"
 toml = { version = "0.8", features = ["parse"] }
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "ansi", "json"] }
+tracing = "0.x"
+tracing-subscriber = { version = "0.x", features = ["env-filter", "ansi", "json"] }
 
 # Filesystem watching
-notify = "6.1"
+notify = "8.x"
 
 # Error handling
-thiserror = "1.0"
-anyhow = "1.0"
+thiserror = "1.x"
+anyhow = "1.x"
 
 # URL parsing
 url = "2.5"
@@ -62,7 +62,7 @@ futures-util = "0.3"
 md5 = "0.7"
 
 # Steam Workshop integration
-steam-vent = "0.4.2"
+steam-vent = "0.5"
 steam-vent-proto-steam = "0.5.2"
 
 [dev-dependencies]
