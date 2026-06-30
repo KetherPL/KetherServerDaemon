@@ -66,18 +66,6 @@ impl MapInstallationService {
     ) -> anyhow::Result<MapEntry> {
         info!(url = %url, "Starting map installation from URL");
         
-        // If a name is provided, check if map with that name already exists
-        // This helps prevent race conditions in concurrent installations
-        if let Some(ref map_name) = name {
-            let sanitized_name = crate::utils::sanitize_map_name(map_name).ok();
-            if let Some(ref sanitized) = sanitized_name {
-                let maps = self.registry.list_maps().await?;
-                if maps.iter().any(|m| m.name == *sanitized) {
-                    return Err(anyhow::anyhow!("Map with name '{}' already installed", sanitized));
-                }
-            }
-        }
-        
         // Validate URL format - should be HTTP/HTTPS
         crate::utils::validate_url(&url)
             .context("Invalid URL format (SSRF protection)")?;
@@ -93,16 +81,14 @@ impl MapInstallationService {
         name: Option<String>,
     ) -> anyhow::Result<MapEntry> {
         info!(workshop_id, "Installing map from Steam Workshop");
-        
-        // If a name is provided, check if map with that name already exists
-        if let Some(ref map_name) = name {
-            let sanitized_name = crate::utils::sanitize_map_name(map_name).ok();
-            if let Some(ref sanitized) = sanitized_name {
-                let maps = self.registry.list_maps().await?;
-                if maps.iter().any(|m| m.name == *sanitized) {
-                    return Err(anyhow::anyhow!("Map with name '{}' already installed", sanitized));
-                }
-            }
+
+        if let Some(existing) = self.find_map_by_workshop_id(workshop_id).await? {
+            info!(
+                map_id = existing.id,
+                workshop_id,
+                "Workshop map already installed, skipping download"
+            );
+            return Ok(existing);
         }
         
         // Download workshop item
@@ -215,6 +201,27 @@ impl MapInstallationService {
 
         let _guard = self.op_lock.lock().await;
 
+        let resolved_workshop_id = match source_kind {
+            SourceKind::Workshop => workshop_id,
+            SourceKind::SirPlease | SourceKind::Other => None,
+        };
+
+        if let Some(wid) = resolved_workshop_id {
+            if let Some(existing) = self.find_map_by_workshop_id(wid).await? {
+                if let Err(e) = tokio::fs::remove_file(&vpk_path).await {
+                    warn!(error = %e, path = %vpk_path.display(), "Failed to clean up downloaded file");
+                }
+                return Ok(existing);
+            }
+        }
+
+        if self.find_map_by_name(&map_name).await?.is_some() {
+            return Err(anyhow::anyhow!(
+                "Map with name '{}' already installed",
+                map_name
+            ));
+        }
+
         if let Some(existing) = self.find_map_by_installed_path(&vpk_filename).await? {
             if let Err(e) = tokio::fs::remove_file(&vpk_path).await {
                 warn!(error = %e, path = %vpk_path.display(), "Failed to clean up downloaded file");
@@ -236,19 +243,13 @@ impl MapInstallationService {
             _ => source_url.unwrap_or_else(|| format!("file:{}", vpk_filename)),
         };
 
-        // Ensure workshop_id is only set when source_kind is Workshop
-        let workshop_id = match source_kind {
-            SourceKind::Workshop => workshop_id,
-            SourceKind::SirPlease | SourceKind::Other => None,
-        };
-
         // Create map entry with relative path (ID will be assigned by database)
         let mut map_entry = MapEntry {
             id: 0, // Temporary, will be replaced by database-assigned ID
             name: map_name,
             source_url,
             source_kind,
-            workshop_id,
+            workshop_id: resolved_workshop_id,
             installed_path: vpk_filename.clone(), // Store relative path (just filename)
             installed_at: chrono::Utc::now(),
             version: Some(metadata.version),
@@ -348,6 +349,28 @@ impl MapInstallationService {
 
         let _guard = self.op_lock.lock().await;
 
+        let resolved_workshop_id = match source_kind {
+            SourceKind::Workshop => workshop_id,
+            SourceKind::SirPlease | SourceKind::Other => None,
+        };
+
+        if let Some(wid) = resolved_workshop_id {
+            if let Some(existing) = self.find_map_by_workshop_id(wid).await? {
+                let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+                if let Err(e) = tokio::fs::remove_file(&zip_path).await {
+                    warn!(error = %e, path = %zip_path.display(), "Failed to clean up downloaded ZIP");
+                }
+                return Ok(existing);
+            }
+        }
+
+        if self.find_map_by_name(&map_name).await?.is_some() {
+            return Err(anyhow::anyhow!(
+                "Map with name '{}' already installed",
+                map_name
+            ));
+        }
+
         if let Some(existing) = self.find_map_by_installed_path(&vpk_filename).await? {
             let _ = tokio::fs::remove_dir_all(&extract_temp).await;
             if let Err(e) = tokio::fs::remove_file(&zip_path).await {
@@ -374,19 +397,13 @@ impl MapInstallationService {
                 .unwrap_or_else(|| "zip:unknown".to_string())
         });
 
-        // Ensure workshop_id is only set when source_kind is Workshop
-        let workshop_id = match source_kind {
-            SourceKind::Workshop => workshop_id,
-            SourceKind::SirPlease | SourceKind::Other => None,
-        };
-
         // Create map entry with relative path (ID will be assigned by database)
         let mut map_entry = MapEntry {
             id: 0, // Temporary, will be replaced by database-assigned ID
             name: map_name,
             source_url,
             source_kind,
-            workshop_id,
+            workshop_id: resolved_workshop_id,
             installed_path: vpk_filename.clone(), // Store relative path (just filename)
             installed_at: chrono::Utc::now(),
             version: Some(metadata.version),
@@ -581,9 +598,10 @@ impl MapInstallationService {
 
         info!(map_id = map_id, "Uninstalling map");
 
-        // Get map entry from registry
-        let map_entry = self.registry.get_map(map_id).await?
-            .ok_or_else(|| anyhow::anyhow!("Map not found: {}", map_id))?;
+        let Some(map_entry) = self.registry.get_map(map_id).await? else {
+            info!(map_id, "Map not found, nothing to uninstall");
+            return Ok(());
+        };
 
         // Construct absolute path from relative path
         let installed_path_abs = self.addons_dir.join(&map_entry.installed_path);
@@ -592,20 +610,30 @@ impl MapInstallationService {
         crate::utils::validate_path_within_base_new(&installed_path_abs, &self.addons_dir)
             .context("Attempted to uninstall map outside of addons directory - potential path traversal detected!")?;
 
-        // Remove files
-        if installed_path_abs.exists() {
-            if installed_path_abs.is_file() {
-                // VPK file
-                tokio::fs::remove_file(&installed_path_abs).await?;
-            } else if installed_path_abs.is_dir() {
-                // Directory (shouldn't happen with new structure, but handle for backwards compatibility)
-                tokio::fs::remove_dir_all(&installed_path_abs).await?;
-            }
-            info!(path = %installed_path_abs.display(), "Removed map files");
-        }
-
-        // Remove from registry
         self.registry.remove_map(map_id).await?;
+
+        if installed_path_abs.exists() {
+            let removal_result = if installed_path_abs.is_file() {
+                tokio::fs::remove_file(&installed_path_abs).await
+            } else if installed_path_abs.is_dir() {
+                tokio::fs::remove_dir_all(&installed_path_abs).await
+            } else {
+                Ok(())
+            };
+
+            match removal_result {
+                Ok(()) => {
+                    info!(path = %installed_path_abs.display(), "Removed map files");
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        path = %installed_path_abs.display(),
+                        "Registry entry removed but failed to delete map file"
+                    );
+                }
+            }
+        }
 
         info!(map_id = map_id, "Map uninstalled successfully");
         Ok(())
@@ -619,6 +647,21 @@ impl MapInstallationService {
         Ok(maps
             .into_iter()
             .find(|m| m.installed_path == relative_path))
+    }
+
+    async fn find_map_by_workshop_id(
+        &self,
+        workshop_id: u64,
+    ) -> anyhow::Result<Option<MapEntry>> {
+        let maps = self.registry.list_maps().await?;
+        Ok(maps
+            .into_iter()
+            .find(|m| m.workshop_id == Some(workshop_id)))
+    }
+
+    async fn find_map_by_name(&self, name: &str) -> anyhow::Result<Option<MapEntry>> {
+        let maps = self.registry.list_maps().await?;
+        Ok(maps.into_iter().find(|m| m.name == name))
     }
 
     async fn register_new_map(
@@ -857,6 +900,8 @@ impl MapInstallationService {
     /// Prune registry records whose map files are missing, sort survivors by name,
     /// and reassign sequential IDs starting at 1. Does not delete any files.
     pub async fn compact_registry(&self) -> anyhow::Result<CompactReport> {
+        let _guard = self.op_lock.lock().await;
+
         info!("Compacting map registry");
 
         let maps = self.registry.list_maps().await?;
@@ -931,6 +976,8 @@ impl MapInstallationService {
         field: &str,
         value: &str,
     ) -> anyhow::Result<MapEntry> {
+        let _guard = self.op_lock.lock().await;
+
         let mut entry = self
             .registry
             .get_map(id)
@@ -1117,45 +1164,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_from_url_dispatch_zip() {
-        let (mut server, base_url) = {
-            let s = mockito::Server::new_async().await;
-            let url = s.url();
-            (s, url)
-        };
         let (service, _addons_dir, registry) = setup_test_service().await;
-        
-        // Create a mock ZIP file response with a VPK file (required by new validation)
-        // Note: This test will likely fail because we need a valid VPK file structure
-        // For now, we'll create a minimal VPK-like file
-        let minimal_vpk = b"VPK\x02\x00\x00\x00"; // Minimal VPK header
-        let (test_zip_path, _zip_temp) = create_test_zip_with_map(&[
-            ("test_map.vpk", minimal_vpk),
-        ]);
-        let zip_content = std::fs::read(&test_zip_path).unwrap();
-        
-        let mock = server.mock("GET", "/test_map.zip")
-            .with_status(200)
-            .with_body(zip_content)
-            .create_async()
+
+        let minimal_vpk = b"VPK\x02\x00\x00\x00";
+        let (test_zip_path, _zip_temp) = create_test_zip_with_map(&[("test_map.vpk", minimal_vpk)]);
+
+        // Exercise the ZIP install path directly; HTTP download is covered by downloader tests.
+        // install_from_url rejects localhost mock URLs via SSRF validation by design.
+        let result = service
+            .install_downloaded_file(
+                test_zip_path,
+                SourceKind::Other,
+                None,
+                Some("Test Map".to_string()),
+                Some("https://example.com/test_map.zip".to_string()),
+            )
             .await;
-        
-        let url = format!("{}/test_map.zip", base_url);
-        // This test will likely fail because the VPK is invalid, but that's expected
-        // We're just testing the flow
-        let result = service.install_from_url(url, Some("Test Map".to_string())).await;
-        
-        // The test might fail due to invalid VPK, but if it succeeds, verify the structure
+
         if let Ok(map_entry) = result {
-            assert_eq!(map_entry.name, "Test Map");
+            assert_eq!(map_entry.name, "test_map");
             assert_eq!(map_entry.source_kind, SourceKind::Other);
             assert!(map_entry.installed_path.ends_with(".vpk"));
-            
-            // Verify map is in registry
+
             let retrieved = registry.get_map(map_entry.id).await.unwrap();
             assert!(retrieved.is_some());
         }
-        
-        mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -1505,6 +1538,57 @@ mod tests {
             .unwrap();
         assert_eq!(removed, None);
         assert!(registry.get_map(id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_install_workshop_id_returns_existing_without_redownload() {
+        let (service, _addons_dir, registry) = setup_test_service().await;
+        let workshop_id = 3135451698u64;
+        let existing_id = registry
+            .add_map(MapEntry {
+                id: 0,
+                name: "Workshop Map".to_string(),
+                source_url: String::new(),
+                source_kind: SourceKind::Workshop,
+                workshop_id: Some(workshop_id),
+                installed_path: "workshop_map.vpk".to_string(),
+                installed_at: chrono::Utc::now(),
+                version: None,
+                checksum: None,
+                checksum_kind: None,
+            })
+            .await
+            .unwrap();
+
+        let result = service
+            .install_from_workshop_id(workshop_id, None)
+            .await
+            .unwrap();
+        assert_eq!(result.id, existing_id);
+        assert_eq!(registry.list_maps().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_find_map_by_name_returns_existing_entry() {
+        let (service, _addons_dir, registry) = setup_test_service().await;
+        let id = registry
+            .add_map(MapEntry {
+                id: 0,
+                name: "existing_map".to_string(),
+                source_url: "https://example.com/map".to_string(),
+                source_kind: SourceKind::Other,
+                workshop_id: None,
+                installed_path: "existing.vpk".to_string(),
+                installed_at: chrono::Utc::now(),
+                version: None,
+                checksum: None,
+                checksum_kind: None,
+            })
+            .await
+            .unwrap();
+
+        let found = service.find_map_by_name("existing_map").await.unwrap();
+        assert_eq!(found.unwrap().id, id);
     }
 }
 

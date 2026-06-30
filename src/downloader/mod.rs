@@ -5,6 +5,9 @@ pub mod workshop;
 pub mod zip;
 pub mod steam;
 
+#[cfg(test)]
+mod test_lock;
+
 pub use traits::Downloader;
 pub use client::HttpClient;
 pub use workshop::WorkshopDownloader;

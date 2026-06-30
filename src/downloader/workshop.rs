@@ -103,38 +103,23 @@ impl Downloader for WorkshopDownloader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockito::ServerGuard;
+    use crate::downloader::test_lock::acquire_http_test_lock;
     use tempfile::TempDir;
-
-    async fn setup_mock_server() -> (ServerGuard, String) {
-        let server = mockito::Server::new_async().await;
-        let base_url = server.url();
-        (server, base_url)
-    }
 
     #[tokio::test]
     async fn test_download_zip_delegation() {
-        let (mut server, base_url) = setup_mock_server().await;
+        let http = acquire_http_test_lock().await;
         let temp_dir = TempDir::new().unwrap();
         let downloader = WorkshopDownloader::new(temp_dir.path().to_path_buf()).unwrap();
-        
-        let mock = server.mock("GET", "/test.zip")
-            .with_status(200)
-            .with_body("zip content")
-            .create_async()
-            .await;
-        
-        let url = format!("{}/test.zip", base_url);
+        let url = http.url("/workshop.zip");
+
         let result = downloader.download_zip(&url).await;
-        
         assert!(result.is_ok());
         let downloaded_path = result.unwrap();
         assert!(downloaded_path.exists());
-        
+
         let content = std::fs::read_to_string(&downloaded_path).unwrap();
         assert_eq!(content, "zip content");
-        
-        mock.assert_async().await;
     }
 
     #[tokio::test]

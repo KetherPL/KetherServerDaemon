@@ -128,8 +128,12 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::NamedTempFile;
+
+    /// Nonexistent path so `Config::load()` never reads a workspace `config.toml`.
+    const ISOLATED_CONFIG_PATH: &str = "/tmp/kether-test-no-config.toml";
     
     // Helper functions to safely modify environment variables in tests
     fn set_env_var(key: &str, value: &str) {
@@ -144,10 +148,21 @@ mod tests {
         }
     }
 
+    fn clear_kether_env_vars() {
+        remove_env_var("KETHER_CONFIG");
+        remove_env_var("KETHER_L4D2_SERVER_DIR");
+        remove_env_var("KETHER_REGISTRY_PATH");
+        remove_env_var("KETHER_BACKEND_API_URL");
+        remove_env_var("KETHER_BACKEND_API_KEY");
+        remove_env_var("KETHER_LOCAL_API_BIND");
+        remove_env_var("KETHER_SYNC_INTERVAL_SECS");
+        remove_env_var("KETHER_LOG_LEVEL");
+    }
+
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.l4d2_server_dir, PathBuf::from("/opt/l4d2/server"));
+        assert_eq!(config.l4d2_server_dir, PathBuf::from("/home/steam/l4d2"));
         assert_eq!(config.registry_path, PathBuf::from("registry.json"));
         assert_eq!(config.backend_api_url, "http://localhost:3000/api");
         assert_eq!(config.backend_api_key, None);
@@ -160,36 +175,29 @@ mod tests {
     fn test_addons_dir() {
         let config = Config::default();
         let addons_dir = config.addons_dir();
-        assert_eq!(addons_dir, PathBuf::from("/opt/l4d2/server/left4dead2/addons"));
+        assert_eq!(addons_dir, PathBuf::from("/home/steam/l4d2/left4dead2/addons"));
     }
 
     #[test]
+    #[serial]
     fn test_load_missing_config_file() {
-        // Save original KETHER_CONFIG env var if it exists
         let original_config = std::env::var("KETHER_CONFIG").ok();
-        remove_env_var("KETHER_CONFIG");
-        
-        // Clear all KETHER_* env vars to test defaults
-        remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_PATH");
-        remove_env_var("KETHER_BACKEND_API_URL");
-        remove_env_var("KETHER_BACKEND_API_KEY");
-        remove_env_var("KETHER_LOCAL_API_BIND");
-        remove_env_var("KETHER_SYNC_INTERVAL_SECS");
-        remove_env_var("KETHER_LOG_LEVEL");
+        clear_kether_env_vars();
+        set_env_var("KETHER_CONFIG", ISOLATED_CONFIG_PATH);
 
-        // This should fall back to defaults since config.toml doesn't exist
         let config = Config::load().unwrap();
-        assert_eq!(config.l4d2_server_dir, PathBuf::from("/opt/l4d2/server"));
+        assert_eq!(config.l4d2_server_dir, PathBuf::from("/home/steam/l4d2"));
         assert_eq!(config.registry_path, PathBuf::from("registry.json"));
 
-        // Restore original env var
         if let Some(val) = original_config {
             set_env_var("KETHER_CONFIG", &val);
+        } else {
+            remove_env_var("KETHER_CONFIG");
         }
     }
 
     #[test]
+    #[serial]
     fn test_load_from_toml() {
         let temp_file = NamedTempFile::new().unwrap();
         let config_content = r#"
@@ -234,17 +242,12 @@ log_level = "debug"
     }
 
     #[test]
+    #[serial]
     fn test_env_var_override_l4d2_server_dir() {
         let original = std::env::var("KETHER_L4D2_SERVER_DIR").ok();
+        clear_kether_env_vars();
+        set_env_var("KETHER_CONFIG", ISOLATED_CONFIG_PATH);
         set_env_var("KETHER_L4D2_SERVER_DIR", "/env/server/path");
-        
-        remove_env_var("KETHER_CONFIG");
-        remove_env_var("KETHER_REGISTRY_PATH");
-        remove_env_var("KETHER_BACKEND_API_URL");
-        remove_env_var("KETHER_BACKEND_API_KEY");
-        remove_env_var("KETHER_LOCAL_API_BIND");
-        remove_env_var("KETHER_SYNC_INTERVAL_SECS");
-        remove_env_var("KETHER_LOG_LEVEL");
 
         let config = Config::load().unwrap();
         assert_eq!(config.l4d2_server_dir, PathBuf::from("/env/server/path"));
@@ -257,17 +260,12 @@ log_level = "debug"
     }
 
     #[test]
+    #[serial]
     fn test_env_var_override_registry_path() {
         let original = std::env::var("KETHER_REGISTRY_PATH").ok();
+        clear_kether_env_vars();
+        set_env_var("KETHER_CONFIG", ISOLATED_CONFIG_PATH);
         set_env_var("KETHER_REGISTRY_PATH", "/env/registry.json");
-        
-        remove_env_var("KETHER_CONFIG");
-        remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_BACKEND_API_URL");
-        remove_env_var("KETHER_BACKEND_API_KEY");
-        remove_env_var("KETHER_LOCAL_API_BIND");
-        remove_env_var("KETHER_SYNC_INTERVAL_SECS");
-        remove_env_var("KETHER_LOG_LEVEL");
 
         let config = Config::load().unwrap();
         assert_eq!(config.registry_path, PathBuf::from("/env/registry.json"));
@@ -280,17 +278,12 @@ log_level = "debug"
     }
 
     #[test]
+    #[serial]
     fn test_env_var_override_backend_api_url() {
         let original = std::env::var("KETHER_BACKEND_API_URL").ok();
+        clear_kether_env_vars();
+        set_env_var("KETHER_CONFIG", ISOLATED_CONFIG_PATH);
         set_env_var("KETHER_BACKEND_API_URL", "http://env-api.example.com");
-        
-        remove_env_var("KETHER_CONFIG");
-        remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_PATH");
-        remove_env_var("KETHER_BACKEND_API_KEY");
-        remove_env_var("KETHER_LOCAL_API_BIND");
-        remove_env_var("KETHER_SYNC_INTERVAL_SECS");
-        remove_env_var("KETHER_LOG_LEVEL");
 
         let config = Config::load().unwrap();
         assert_eq!(config.backend_api_url, "http://env-api.example.com");
@@ -303,17 +296,12 @@ log_level = "debug"
     }
 
     #[test]
+    #[serial]
     fn test_env_var_override_backend_api_key() {
         let original = std::env::var("KETHER_BACKEND_API_KEY").ok();
+        clear_kether_env_vars();
+        set_env_var("KETHER_CONFIG", ISOLATED_CONFIG_PATH);
         set_env_var("KETHER_BACKEND_API_KEY", "env-key-456");
-        
-        remove_env_var("KETHER_CONFIG");
-        remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_PATH");
-        remove_env_var("KETHER_BACKEND_API_URL");
-        remove_env_var("KETHER_LOCAL_API_BIND");
-        remove_env_var("KETHER_SYNC_INTERVAL_SECS");
-        remove_env_var("KETHER_LOG_LEVEL");
 
         let config = Config::load().unwrap();
         assert_eq!(config.backend_api_key, Some("env-key-456".to_string()));
@@ -326,17 +314,12 @@ log_level = "debug"
     }
 
     #[test]
+    #[serial]
     fn test_env_var_override_local_api_bind() {
         let original = std::env::var("KETHER_LOCAL_API_BIND").ok();
+        clear_kether_env_vars();
+        set_env_var("KETHER_CONFIG", ISOLATED_CONFIG_PATH);
         set_env_var("KETHER_LOCAL_API_BIND", "192.168.1.1:9090");
-        
-        remove_env_var("KETHER_CONFIG");
-        remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_PATH");
-        remove_env_var("KETHER_BACKEND_API_URL");
-        remove_env_var("KETHER_BACKEND_API_KEY");
-        remove_env_var("KETHER_SYNC_INTERVAL_SECS");
-        remove_env_var("KETHER_LOG_LEVEL");
 
         let config = Config::load().unwrap();
         assert_eq!(config.local_api_bind, SocketAddr::from_str("192.168.1.1:9090").unwrap());
@@ -349,17 +332,12 @@ log_level = "debug"
     }
 
     #[test]
+    #[serial]
     fn test_env_var_override_sync_interval_secs() {
         let original = std::env::var("KETHER_SYNC_INTERVAL_SECS").ok();
+        clear_kether_env_vars();
+        set_env_var("KETHER_CONFIG", ISOLATED_CONFIG_PATH);
         set_env_var("KETHER_SYNC_INTERVAL_SECS", "120");
-        
-        remove_env_var("KETHER_CONFIG");
-        remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_PATH");
-        remove_env_var("KETHER_BACKEND_API_URL");
-        remove_env_var("KETHER_BACKEND_API_KEY");
-        remove_env_var("KETHER_LOCAL_API_BIND");
-        remove_env_var("KETHER_LOG_LEVEL");
 
         let config = Config::load().unwrap();
         assert_eq!(config.sync_interval_secs, 120);
@@ -372,17 +350,12 @@ log_level = "debug"
     }
 
     #[test]
+    #[serial]
     fn test_env_var_override_log_level() {
         let original = std::env::var("KETHER_LOG_LEVEL").ok();
+        clear_kether_env_vars();
+        set_env_var("KETHER_CONFIG", ISOLATED_CONFIG_PATH);
         set_env_var("KETHER_LOG_LEVEL", "trace");
-        
-        remove_env_var("KETHER_CONFIG");
-        remove_env_var("KETHER_L4D2_SERVER_DIR");
-        remove_env_var("KETHER_REGISTRY_PATH");
-        remove_env_var("KETHER_BACKEND_API_URL");
-        remove_env_var("KETHER_BACKEND_API_KEY");
-        remove_env_var("KETHER_LOCAL_API_BIND");
-        remove_env_var("KETHER_SYNC_INTERVAL_SECS");
 
         let config = Config::load().unwrap();
         assert_eq!(config.log_level, "trace");

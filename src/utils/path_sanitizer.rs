@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn test_sanitize_map_name_with_path_traversal() {
         let result = sanitize_map_name("../../../etc/passwd");
-        assert!(result.is_err() || result.unwrap().contains("etc") == false);
+        assert_eq!(result.unwrap(), "etcpasswd");
     }
 
     #[test]

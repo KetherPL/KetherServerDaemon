@@ -19,13 +19,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use config::Config;
 use logging::setup_logging;
 use registry::{JsonRegistry, Registry};
 use sync::{BackendSyncService, SyncService};
-use watcher::{InotifyWatcher, Watcher};
+use watcher::{InotifyWatcher, PendingEntry, Watcher, schedule_pending, should_force_sync};
 use api::HttpServer;
 use map_installer::MapInstallationService;
 use repl::{DaemonCommand, start_key_listener};
@@ -78,8 +78,10 @@ async fn main() -> anyhow::Result<()> {
     let watcher_task = tokio::spawn(async move {
         info!("Watcher task started");
         let mut receiver = watcher_events;
-        let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+        let mut pending: HashMap<PathBuf, PendingEntry> = HashMap::new();
+        let mut last_unstable_log: HashMap<PathBuf, Instant> = HashMap::new();
         let debounce_window = Duration::from_secs(1);
+        let max_stable_wait = Duration::from_secs(60);
         let mut poll_tick = tokio::time::interval(Duration::from_millis(250));
 
         loop {
@@ -93,18 +95,31 @@ async fn main() -> anyhow::Result<()> {
                         watcher::WatcherEvent::Create(path) => {
                             info!(path = %path.display(), "File created in addons directory");
                             if path.extension().and_then(|e| e.to_str()) == Some("vpk") {
-                                pending.insert(path, Instant::now() + debounce_window);
+                                schedule_pending(
+                                    &mut pending,
+                                    &mut last_unstable_log,
+                                    path,
+                                    Instant::now(),
+                                    debounce_window,
+                                );
                             }
                         }
                         watcher::WatcherEvent::Modify(path) => {
                             info!(path = %path.display(), "File modified in addons directory");
                             if path.extension().and_then(|e| e.to_str()) == Some("vpk") {
-                                pending.insert(path, Instant::now() + debounce_window);
+                                schedule_pending(
+                                    &mut pending,
+                                    &mut last_unstable_log,
+                                    path,
+                                    Instant::now(),
+                                    debounce_window,
+                                );
                             }
                         }
                         watcher::WatcherEvent::Remove(path) => {
                             info!(path = %path.display(), "File removed from addons directory");
                             pending.remove(&path);
+                            last_unstable_log.remove(&path);
                             if let Err(e) = installer_watcher.remove_map_by_path(path).await {
                                 warn!(error = %e, "Failed to remove map from registry after file deletion");
                             }
@@ -113,20 +128,50 @@ async fn main() -> anyhow::Result<()> {
                 }
                 _ = poll_tick.tick() => {
                     let now = Instant::now();
-                    let ready: Vec<PathBuf> = pending
+                    let ready: Vec<(PathBuf, PendingEntry)> = pending
                         .iter()
-                        .filter(|(_, deadline)| **deadline <= now)
-                        .map(|(path, _)| path.clone())
+                        .filter(|(_, entry)| entry.deadline <= now)
+                        .map(|(path, entry)| (path.clone(), *entry))
                         .collect();
 
-                    for path in ready {
-                        if !utils::file_is_stable(&path).await {
+                    for (path, entry) in ready {
+                        let pending_age_ms = now.duration_since(entry.first_seen).as_millis();
+                        let force_unstable = should_force_sync(entry.first_seen, now, max_stable_wait);
+
+                        if !force_unstable && !utils::file_is_stable(&path).await {
+                            let should_log = last_unstable_log
+                                .get(&path)
+                                .is_none_or(|last| now.duration_since(*last) >= Duration::from_secs(1));
+                            if should_log {
+                                debug!(
+                                    path = %path.display(),
+                                    pending_age_ms,
+                                    "File still unstable, waiting for size to settle"
+                                );
+                                last_unstable_log.insert(path.clone(), now);
+                            }
                             continue;
                         }
 
+                        if force_unstable {
+                            warn!(
+                                path = %path.display(),
+                                pending_age_ms,
+                                max_stable_wait_secs = max_stable_wait.as_secs(),
+                                "File never stabilized, forcing sync attempt"
+                            );
+                        }
+
                         pending.remove(&path);
+                        last_unstable_log.remove(&path);
                         if let Err(e) = installer_watcher.sync_map_from_path(path.clone()).await {
-                            warn!(error = %e, path = %path.display(), "Failed to sync map from path");
+                            warn!(
+                                error = %e,
+                                path = %path.display(),
+                                pending_age_ms,
+                                forced_unstable = force_unstable,
+                                "Failed to sync map from path"
+                            );
                         }
                     }
                 }
