@@ -11,11 +11,11 @@ pub struct ZipDownloader {
 }
 
 impl ZipDownloader {
-    pub async fn new(temp_dir: PathBuf) -> anyhow::Result<Self> {
+    pub async fn new(temp_dir: PathBuf, max_download_size_bytes: u64) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(&temp_dir).await?;
         
         Ok(Self {
-            client: HttpClient::new(100 * 1024 * 1024)?, // Default 100MB, should be passed from config
+            client: HttpClient::new(max_download_size_bytes)?,
             temp_dir,
         })
     }
@@ -64,7 +64,7 @@ mod tests {
     async fn test_download_zip_success() {
         let http = acquire_http_test_lock().await;
         let temp_dir = TempDir::new().unwrap();
-        let downloader = ZipDownloader::new(temp_dir.path().to_path_buf()).await.unwrap();
+        let downloader = ZipDownloader::new(temp_dir.path().to_path_buf(), 100 * 1024 * 1024).await.unwrap();
         let url = http.url("/test.zip");
 
         let result = downloader.download_zip(&url).await;
@@ -81,7 +81,7 @@ mod tests {
     async fn test_download_zip_with_path() {
         let http = acquire_http_test_lock().await;
         let temp_dir = TempDir::new().unwrap();
-        let downloader = ZipDownloader::new(temp_dir.path().to_path_buf()).await.unwrap();
+        let downloader = ZipDownloader::new(temp_dir.path().to_path_buf(), 100 * 1024 * 1024).await.unwrap();
         let url = http.url("/maps/custom/test_map.zip");
 
         let result = downloader.download_zip(&url).await;
@@ -95,7 +95,7 @@ mod tests {
     async fn test_download_zip_without_extension() {
         let http = acquire_http_test_lock().await;
         let temp_dir = TempDir::new().unwrap();
-        let downloader = ZipDownloader::new(temp_dir.path().to_path_buf()).await.unwrap();
+        let downloader = ZipDownloader::new(temp_dir.path().to_path_buf(), 100 * 1024 * 1024).await.unwrap();
         let url = http.url("/download");
 
         let result = downloader.download_zip(&url).await;
@@ -109,7 +109,7 @@ mod tests {
     async fn test_download_zip_error() {
         let http = acquire_http_test_lock().await;
         let temp_dir = TempDir::new().unwrap();
-        let downloader = ZipDownloader::new(temp_dir.path().to_path_buf()).await.unwrap();
+        let downloader = ZipDownloader::new(temp_dir.path().to_path_buf(), 100 * 1024 * 1024).await.unwrap();
         let url = http.url("/error.zip");
 
         let result = downloader.download_zip(&url).await;
@@ -119,7 +119,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_workshop_not_supported() {
         let temp_dir = TempDir::new().unwrap();
-        let downloader = ZipDownloader::new(temp_dir.path().to_path_buf()).await.unwrap();
+        let downloader = ZipDownloader::new(temp_dir.path().to_path_buf(), 100 * 1024 * 1024).await.unwrap();
 
         let result = downloader.download_workshop(123456789).await;
         assert!(result.is_err());

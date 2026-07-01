@@ -28,7 +28,7 @@ pub struct Config {
     /// Logging level (trace, debug, info, warn, error)
     pub log_level: String,
     
-    /// Maximum download size in bytes (default: 100MB)
+    /// Maximum download size in bytes (default: 1GB)
     #[serde(default = "default_max_download_size")]
     pub max_download_size_bytes: u64,
     
@@ -42,7 +42,7 @@ pub struct Config {
 }
 
 fn default_max_download_size() -> u64 {
-    100 * 1024 * 1024 // 100MB
+    1024 * 1024 * 1024 // 1GB — L4D2 workshop campaigns often exceed 100MB
 }
 
 fn default_max_extraction_size() -> u64 {

@@ -66,6 +66,9 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&registry),
             addons_dir.clone(),
             temp_dir.clone(),
+            config.max_download_size_bytes,
+            config.max_extraction_size_bytes,
+            config.max_extraction_file_count,
         )
         .await?
     );
@@ -93,27 +96,33 @@ async fn main() -> anyhow::Result<()> {
 
                     match event {
                         watcher::WatcherEvent::Create(path) => {
-                            info!(path = %path.display(), "File created in addons directory");
                             if path.extension().and_then(|e| e.to_str()) == Some("vpk") {
+                                let is_new = !pending.contains_key(&path);
                                 schedule_pending(
                                     &mut pending,
                                     &mut last_unstable_log,
-                                    path,
+                                    path.clone(),
                                     Instant::now(),
                                     debounce_window,
                                 );
+                                if is_new {
+                                    info!(path = %path.display(), "File created in addons directory");
+                                }
                             }
                         }
                         watcher::WatcherEvent::Modify(path) => {
-                            info!(path = %path.display(), "File modified in addons directory");
                             if path.extension().and_then(|e| e.to_str()) == Some("vpk") {
+                                let is_new = !pending.contains_key(&path);
                                 schedule_pending(
                                     &mut pending,
                                     &mut last_unstable_log,
-                                    path,
+                                    path.clone(),
                                     Instant::now(),
                                     debounce_window,
                                 );
+                                if is_new {
+                                    info!(path = %path.display(), "File modified in addons directory");
+                                }
                             }
                         }
                         watcher::WatcherEvent::Remove(path) => {

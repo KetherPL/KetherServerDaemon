@@ -14,7 +14,12 @@ impl HttpClient {
         let client = Client::builder()
             .no_proxy()
             .pool_max_idle_per_host(0)
-            .timeout(Duration::from_secs(300)) // 5 minute timeout for large downloads
+            // Large workshop VPKs can take well over 5 minutes on typical links.
+            .timeout(Duration::from_secs(3600))
+            .read_timeout(Duration::from_secs(120))
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
             .user_agent("KetherServerDaemon/0.0.1")
             .build()?;
         
@@ -83,7 +88,17 @@ impl HttpClient {
         let mut file = tokio::fs::File::create(output_path).await?;
         
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
+            let chunk = match chunk_result {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(output_path).await;
+                    return Err(anyhow::anyhow!(
+                        "Download stream failed after {} bytes: {}",
+                        downloaded,
+                        error
+                    ));
+                }
+            };
             downloaded += chunk.len() as u64;
             
             if downloaded > self.max_download_size {

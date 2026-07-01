@@ -83,12 +83,15 @@ impl MapInstallationService {
         registry: Arc<dyn Registry>,
         addons_dir: PathBuf,
         temp_dir: PathBuf,
+        max_download_size_bytes: u64,
+        max_extraction_size_bytes: u64,
+        max_extraction_file_count: u64,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             registry,
-            workshop_downloader: WorkshopDownloader::new(temp_dir.clone())?,
-            zip_downloader: ZipDownloader::new(temp_dir.clone()).await?,
-            zip_extractor: ZipExtractor::new(1024 * 1024 * 1024, 10000), // Default limits, should be passed from config
+            workshop_downloader: WorkshopDownloader::new(temp_dir.clone(), max_download_size_bytes)?,
+            zip_downloader: ZipDownloader::new(temp_dir.clone(), max_download_size_bytes).await?,
+            zip_extractor: ZipExtractor::new(max_extraction_size_bytes, max_extraction_file_count),
             vpk_extractor: VpkExtractor::new(),
             addons_dir,
             temp_dir,
@@ -1431,6 +1434,9 @@ mod tests {
             Arc::clone(&registry),
             addons_dir.path().to_path_buf(),
             temp_dir.path().to_path_buf(),
+            100 * 1024 * 1024,
+            1024 * 1024 * 1024,
+            10000,
         ).await.unwrap();
         
         (service, addons_dir, registry)

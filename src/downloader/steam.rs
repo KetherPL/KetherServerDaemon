@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use chrono::{DateTime, TimeZone, Utc};
+use std::time::Duration;
 use steam_vent::{
     Connection, ConnectionTrait, ServerList,
 };
@@ -11,7 +12,11 @@ use steam_vent_proto_steam::{
         CPublishedFile_GetDetails_Request, CPublishedFile_GetDetails_Response,
     },
 };
-use tracing::info;
+use tracing::{info, warn};
+
+/// steam-vent defaults to 10s; UFS download-URL jobs often need longer.
+const STEAM_JOB_TIMEOUT: Duration = Duration::from_secs(60);
+const STEAM_DOWNLOAD_URL_RETRIES: u32 = 3;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SteamError {
@@ -34,12 +39,32 @@ pub enum SteamError {
     NoDownloadUrl,
 }
 
+impl SteamError {
+    pub fn is_timeout(&self) -> bool {
+        is_steam_timeout(self)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkshopFileDetails {
     pub workshop_id: u64,
     pub hcontent: u64,
     pub time_updated: u32,
     pub file_size: u64,
+    /// Direct CDN URL when available (preferred over UFS hcontent lookup).
+    pub file_url: Option<String>,
+}
+
+fn parse_file_url(item: &steam_vent_proto_steam::steammessages_publishedfile_steamclient::PublishedFileDetails) -> Option<String> {
+    if !item.has_file_url() {
+        return None;
+    }
+    let url = item.file_url().trim().to_string();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
 }
 
 pub fn steam_time_to_utc(secs: u32) -> DateTime<Utc> {
@@ -48,6 +73,14 @@ pub fn steam_time_to_utc(secs: u32) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
+fn is_steam_timeout(error: &SteamError) -> bool {
+    matches!(
+        error,
+        SteamError::Network(steam_vent::NetworkError::Timeout)
+    )
+}
+
+#[derive(Clone)]
 pub struct SteamConnection {
     connection: Connection,
 }
@@ -59,7 +92,8 @@ impl SteamConnection {
         let server_list = ServerList::discover().await?;
         
         info!("Establishing anonymous Steam connection");
-        let connection = Connection::anonymous(&server_list).await?;
+        let mut connection = Connection::anonymous(&server_list).await?;
+        connection.set_timeout(STEAM_JOB_TIMEOUT);
         
         Ok(Self { connection })
     }
@@ -97,6 +131,7 @@ impl SteamConnection {
                 hcontent,
                 time_updated: item.time_updated(),
                 file_size: item.file_size(),
+                file_url: parse_file_url(item),
             });
         }
 
@@ -117,8 +152,34 @@ impl SteamConnection {
             .ok_or(SteamError::WorkshopIdNotFound(workshop_id))
     }
     
-    /// Get download URL from hcontent handle
+    /// Get download URL from hcontent handle, with retries on transient Steam timeouts.
     pub async fn get_download_url(&self, hcontent: u64) -> Result<String, SteamError> {
+        let mut last_error = SteamError::Network(steam_vent::NetworkError::Timeout);
+
+        for attempt in 1..=STEAM_DOWNLOAD_URL_RETRIES {
+            match self.get_download_url_once(hcontent).await {
+                Ok(url) => return Ok(url),
+                Err(error) => {
+                    last_error = error;
+                    if is_steam_timeout(&last_error) && attempt < STEAM_DOWNLOAD_URL_RETRIES {
+                        warn!(
+                            hcontent,
+                            attempt,
+                            max_attempts = STEAM_DOWNLOAD_URL_RETRIES,
+                            "Steam download URL request timed out, retrying"
+                        );
+                        tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
+                        continue;
+                    }
+                    return Err(last_error);
+                }
+            }
+        }
+
+        Err(last_error)
+    }
+
+    async fn get_download_url_once(&self, hcontent: u64) -> Result<String, SteamError> {
         info!(hcontent, "Getting download URL from hcontent");
         
         let mut req = CMsgClientUFSGetUGCDetails::new();
