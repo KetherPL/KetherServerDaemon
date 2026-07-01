@@ -2,5 +2,8 @@
 mod service;
 mod url_parser;
 
-pub use service::{CompactReport, DiscoveryMode, DiscoveryReport, MapInstallationService};
+pub use service::{
+    needs_workshop_update, CompactReport, DiscoveryMode, DiscoveryReport,
+    MapInstallationService, WorkshopUpdateReport,
+};
 

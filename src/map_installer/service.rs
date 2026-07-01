@@ -6,7 +6,12 @@ use anyhow::Context;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::downloader::{workshop::WorkshopDownloader, zip::ZipDownloader, traits::Downloader};
+use crate::downloader::{
+    steam::{steam_time_to_utc, WorkshopFileDetails},
+    workshop::WorkshopDownloader,
+    zip::ZipDownloader,
+    traits::Downloader,
+};
 use crate::extractor::{zip::ZipExtractor, traits::Extractor, vpk::VpkExtractor};
 use crate::registry::{models::{MapEntry, SourceKind}, traits::Registry};
 
@@ -31,6 +36,32 @@ pub struct DiscoveryReport {
 pub struct CompactReport {
     pub removed: Vec<MapEntry>,
     pub kept: Vec<MapEntry>,
+}
+
+pub struct WorkshopUpdateReport {
+    pub updated: Vec<MapEntry>,
+    pub skipped: usize,
+    pub failed: Vec<(u64, String)>,
+    pub not_workshop: usize,
+}
+
+/// Returns true when a workshop map should be re-downloaded from Steam.
+pub fn needs_workshop_update(
+    steam_time_updated: chrono::DateTime<chrono::Utc>,
+    registry_workshop_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    local_file_mtime: Option<chrono::DateTime<chrono::Utc>>,
+    force: bool,
+) -> bool {
+    if force {
+        return true;
+    }
+    if let Some(stored) = registry_workshop_updated_at {
+        return steam_time_updated > stored;
+    }
+    if let Some(mtime) = local_file_mtime {
+        return steam_time_updated > mtime;
+    }
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,12 +121,33 @@ impl MapInstallationService {
             );
             return Ok(existing);
         }
+
+        let details = self
+            .workshop_downloader
+            .get_workshop_file_details(&[workshop_id])
+            .await?;
+        let detail = details
+            .iter()
+            .find(|d| d.workshop_id == workshop_id)
+            .ok_or_else(|| anyhow::anyhow!("Workshop item {workshop_id} not found on Steam"))?;
+
+        let downloaded_path = self
+            .workshop_downloader
+            .download_from_details(detail)
+            .await?;
         
-        // Download workshop item
-        let downloaded_path = self.workshop_downloader.download_workshop(workshop_id).await?;
-        
-        // Determine file type and install (workshop maps have empty source_url)
-        let map_entry = self.install_downloaded_file(downloaded_path, SourceKind::Workshop, Some(workshop_id), name, None).await?;
+        let mut map_entry = self
+            .install_downloaded_file(
+                downloaded_path,
+                SourceKind::Workshop,
+                Some(workshop_id),
+                name,
+                None,
+            )
+            .await?;
+
+        map_entry.workshop_updated_at = Some(steam_time_to_utc(detail.time_updated));
+        self.registry.update_map(map_entry.clone()).await?;
         
         info!(map_id = %map_entry.id, workshop_id, "Workshop map installed successfully");
         Ok(map_entry)
@@ -252,6 +304,7 @@ impl MapInstallationService {
             workshop_id: resolved_workshop_id,
             installed_path: vpk_filename.clone(), // Store relative path (just filename)
             installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
             version: Some(metadata.version),
             checksum,
             checksum_kind,
@@ -406,6 +459,7 @@ impl MapInstallationService {
             workshop_id: resolved_workshop_id,
             installed_path: vpk_filename.clone(), // Store relative path (just filename)
             installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
             version: Some(metadata.version),
             checksum,
             checksum_kind,
@@ -782,6 +836,7 @@ impl MapInstallationService {
             workshop_id,
             installed_path: relative_path.to_string(),
             installed_at,
+            workshop_updated_at: None,
             version: Some(metadata.version),
             checksum,
             checksum_kind,
@@ -1014,10 +1069,288 @@ impl MapInstallationService {
         self.registry.update_map(entry.clone()).await?;
         Ok(entry)
     }
+
+    /// Re-download outdated Steam Workshop maps and replace installed files in place.
+    pub async fn update_workshop_maps(
+        &self,
+        map_id: Option<u64>,
+        force: bool,
+    ) -> anyhow::Result<WorkshopUpdateReport> {
+        let _guard = self.op_lock.lock().await;
+
+        let mut report = WorkshopUpdateReport {
+            updated: Vec::new(),
+            skipped: 0,
+            failed: Vec::new(),
+            not_workshop: 0,
+        };
+
+        let entries = if let Some(id) = map_id {
+            match self.registry.get_map(id).await? {
+                Some(entry) => vec![entry],
+                None => {
+                    return Err(anyhow::anyhow!("Map #{id} not found"));
+                }
+            }
+        } else {
+            self.registry.list_maps().await?
+        };
+
+        struct Candidate {
+            entry: MapEntry,
+            workshop_id: u64,
+        }
+
+        let mut candidates = Vec::new();
+        for entry in entries {
+            match self.resolve_workshop_id_for_entry(&entry).await? {
+                Some(workshop_id) => candidates.push(Candidate { entry, workshop_id }),
+                None => report.not_workshop += 1,
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(report);
+        }
+
+        let workshop_ids: Vec<u64> = candidates.iter().map(|c| c.workshop_id).collect();
+        let details = self
+            .workshop_downloader
+            .get_workshop_file_details(&workshop_ids)
+            .await?;
+        let details_by_id: HashMap<u64, WorkshopFileDetails> = details
+            .into_iter()
+            .map(|detail| (detail.workshop_id, detail))
+            .collect();
+
+        for candidate in candidates {
+            let map_id = candidate.entry.id;
+            let workshop_id = candidate.workshop_id;
+
+            let Some(detail) = details_by_id.get(&workshop_id) else {
+                report.failed.push((
+                    map_id,
+                    format!("Workshop item {workshop_id} not found on Steam"),
+                ));
+                continue;
+            };
+
+            let steam_updated = steam_time_to_utc(detail.time_updated);
+            let install_path = self.addons_dir.join(&candidate.entry.installed_path);
+            let local_mtime = Self::file_modified_time(&install_path).await;
+
+            if !needs_workshop_update(
+                steam_updated,
+                candidate.entry.workshop_updated_at,
+                local_mtime,
+                force,
+            ) {
+                report.skipped += 1;
+                continue;
+            }
+
+            info!(map_id, workshop_id, "Updating outdated workshop map");
+
+            let downloaded = match self
+                .workshop_downloader
+                .download_from_details(detail)
+                .await
+            {
+                Ok(path) => path,
+                Err(error) => {
+                    warn!(
+                        map_id,
+                        workshop_id,
+                        error = %error,
+                        "Workshop map download failed"
+                    );
+                    report.failed.push((map_id, error.to_string()));
+                    continue;
+                }
+            };
+
+            match self
+                .replace_installed_from_download(&candidate.entry, downloaded, steam_updated)
+                .await
+            {
+                Ok(updated) => report.updated.push(updated),
+                Err(error) => {
+                    warn!(
+                        map_id,
+                        workshop_id,
+                        error = %error,
+                        "Workshop map replace failed"
+                    );
+                    report.failed.push((map_id, error.to_string()));
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    async fn resolve_workshop_id_for_entry(
+        &self,
+        entry: &MapEntry,
+    ) -> anyhow::Result<Option<u64>> {
+        if let Some(workshop_id) = entry.workshop_id {
+            return Ok(Some(workshop_id));
+        }
+
+        let path = self.addons_dir.join(&entry.installed_path);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let Some(fresh) = self
+            .build_map_entry_from_file(&path, &entry.installed_path)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        Ok(fresh.workshop_id)
+    }
+
+    async fn replace_installed_from_download(
+        &self,
+        existing: &MapEntry,
+        downloaded: PathBuf,
+        workshop_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<MapEntry> {
+        let install_path = self.addons_dir.join(&existing.installed_path);
+        crate::utils::validate_path_within_base_new(&install_path, &self.addons_dir)
+            .context("Attempted to update map outside of addons directory")?;
+
+        let (source_vpk, temp_cleanup) = self.prepare_vpk_from_download(downloaded).await?;
+
+        tokio::fs::copy(&source_vpk, &install_path)
+            .await
+            .context("Failed to replace installed map file")?;
+        info!(
+            map_id = existing.id,
+            dest = %install_path.display(),
+            "Replaced installed workshop map file"
+        );
+
+        temp_cleanup.cleanup().await;
+
+        let metadata = self
+            .vpk_extractor
+            .extract_vpk_metadata(install_path.clone())
+            .await?;
+        let checksum = crate::utils::calculate_file_md5(&install_path).await.ok();
+        let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
+        let installed_at = Self::file_modified_time(&install_path)
+            .await
+            .unwrap_or_else(chrono::Utc::now);
+
+        let mut updated = existing.clone();
+        updated.version = Some(metadata.version);
+        updated.checksum = checksum;
+        updated.checksum_kind = checksum_kind;
+        updated.workshop_updated_at = Some(workshop_updated_at);
+        updated.installed_at = installed_at;
+        if updated.workshop_id.is_none() {
+            updated.workshop_id = metadata.workshop_id;
+            if updated.workshop_id.is_some() {
+                updated.source_kind = SourceKind::Workshop;
+            }
+        }
+
+        self.registry.update_map(updated.clone()).await?;
+        Ok(updated)
+    }
+
+    async fn prepare_vpk_from_download(
+        &self,
+        downloaded: PathBuf,
+    ) -> anyhow::Result<(PathBuf, DownloadTempCleanup)> {
+        let file_ext = downloaded
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        match file_ext.as_str() {
+            "vpk" => Ok((downloaded, DownloadTempCleanup::empty())),
+            "zip" => {
+                if !self.zip_contains_vpk(&downloaded).await? {
+                    let _ = tokio::fs::remove_file(&downloaded).await;
+                    return Err(anyhow::anyhow!("ZIP file does not contain any .vpk files"));
+                }
+
+                let extract_temp = self.temp_dir.join(format!(
+                    "update-extract-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                tokio::fs::create_dir_all(&extract_temp).await?;
+
+                if let Err(error) = self
+                    .zip_extractor
+                    .extract_zip(downloaded.clone(), extract_temp.clone())
+                    .await
+                {
+                    let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+                    let _ = tokio::fs::remove_file(&downloaded).await;
+                    return Err(error);
+                }
+
+                let vpk_files = self.find_vpk_files_in_extracted(extract_temp.clone()).await?;
+                if vpk_files.is_empty() {
+                    let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+                    let _ = tokio::fs::remove_file(&downloaded).await;
+                    return Err(anyhow::anyhow!("No .vpk files found in extracted ZIP"));
+                }
+
+                Ok((
+                    vpk_files[0].clone(),
+                    DownloadTempCleanup {
+                        paths: vec![downloaded, extract_temp],
+                    },
+                ))
+            }
+            _ => {
+                if self.is_vpk_file(&downloaded).await? {
+                    Ok((downloaded, DownloadTempCleanup::empty()))
+                } else {
+                    let _ = tokio::fs::remove_file(&downloaded).await;
+                    Err(anyhow::anyhow!(
+                        "Unsupported workshop download file type: {file_ext}"
+                    ))
+                }
+            }
+        }
+    }
     
     /// Get reference to registry (for sync task)
     pub fn registry(&self) -> &Arc<dyn Registry> {
         &self.registry
+    }
+}
+
+struct DownloadTempCleanup {
+    paths: Vec<PathBuf>,
+}
+
+impl DownloadTempCleanup {
+    fn empty() -> Self {
+        Self { paths: Vec::new() }
+    }
+
+    async fn cleanup(self) {
+        for path in self.paths {
+            if path.is_dir() {
+                if let Err(error) = tokio::fs::remove_dir_all(&path).await {
+                    warn!(path = %path.display(), error = %error, "Failed to clean up temp directory");
+                }
+            } else if let Err(error) = tokio::fs::remove_file(&path).await {
+                warn!(path = %path.display(), error = %error, "Failed to clean up temp file");
+            }
+        }
     }
 }
 
@@ -1063,6 +1396,7 @@ fn copy_directory(src: PathBuf, dst: PathBuf) -> std::pin::Pin<Box<dyn std::futu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use crate::test_helpers;
     use tempfile::TempDir;
     use zip::write::{FileOptions, ZipWriter};
@@ -1120,6 +1454,7 @@ mod tests {
             workshop_id: None,
             installed_path: "test_map.vpk".to_string(), // Relative path
             installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
             version: None,
             checksum: None,
             checksum_kind: None,
@@ -1209,6 +1544,7 @@ mod tests {
                     workshop_id: None,
                     installed_path: "zulu.vpk".to_string(),
                     installed_at: now,
+                    workshop_updated_at: None,
                     version: None,
                     checksum: None,
                     checksum_kind: None,
@@ -1221,6 +1557,7 @@ mod tests {
                     workshop_id: None,
                     installed_path: "alpha.vpk".to_string(),
                     installed_at: now,
+                    workshop_updated_at: None,
                     version: None,
                     checksum: None,
                     checksum_kind: None,
@@ -1233,6 +1570,7 @@ mod tests {
                     workshop_id: None,
                     installed_path: "missing.vpk".to_string(),
                     installed_at: now,
+                    workshop_updated_at: None,
                     version: None,
                     checksum: None,
                     checksum_kind: None,
@@ -1268,6 +1606,7 @@ mod tests {
             workshop_id: Some(999),
             installed_path: "test_map.vpk".to_string(),
             installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
             version: Some("1.0".to_string()),
             checksum: None,
             checksum_kind: None,
@@ -1352,6 +1691,7 @@ mod tests {
             workshop_id: Some(12345),
             installed_path: "map.vpk".to_string(),
             installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
             version: Some("1".to_string()),
             checksum: Some("old".to_string()),
             checksum_kind: Some("md5".to_string()),
@@ -1365,6 +1705,7 @@ mod tests {
             workshop_id: None,
             installed_path: "map.vpk".to_string(),
             installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
             version: Some("2".to_string()),
             checksum: Some("new".to_string()),
             checksum_kind: Some("md5".to_string()),
@@ -1393,6 +1734,7 @@ mod tests {
             workshop_id: None,
             installed_path: "map.vpk".to_string(),
             installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
             version: Some("1".to_string()),
             checksum: Some("old".to_string()),
             checksum_kind: Some("md5".to_string()),
@@ -1406,6 +1748,7 @@ mod tests {
             workshop_id: Some(999),
             installed_path: "map.vpk".to_string(),
             installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
             version: Some("2".to_string()),
             checksum: Some("new".to_string()),
             checksum_kind: Some("md5".to_string()),
@@ -1437,6 +1780,7 @@ mod tests {
                 workshop_id: None,
                 installed_path: "alpha.vpk".to_string(),
                 installed_at: chrono::Utc::now(),
+                workshop_updated_at: None,
                 version: None,
                 checksum: None,
                 checksum_kind: None,
@@ -1466,6 +1810,7 @@ mod tests {
                 workshop_id: None,
                 installed_path: "alpha.vpk".to_string(),
                 installed_at: chrono::Utc::now(),
+                workshop_updated_at: None,
                 version: None,
                 checksum: Some("old".to_string()),
                 checksum_kind: Some("md5".to_string()),
@@ -1494,6 +1839,7 @@ mod tests {
                 workshop_id: None,
                 installed_path: "gone.vpk".to_string(),
                 installed_at: chrono::Utc::now(),
+                workshop_updated_at: None,
                 version: None,
                 checksum: None,
                 checksum_kind: None,
@@ -1525,6 +1871,7 @@ mod tests {
                 workshop_id: None,
                 installed_path: "exists.vpk".to_string(),
                 installed_at: chrono::Utc::now(),
+                workshop_updated_at: None,
                 version: None,
                 checksum: None,
                 checksum_kind: None,
@@ -1553,6 +1900,7 @@ mod tests {
                 workshop_id: Some(workshop_id),
                 installed_path: "workshop_map.vpk".to_string(),
                 installed_at: chrono::Utc::now(),
+                workshop_updated_at: None,
                 version: None,
                 checksum: None,
                 checksum_kind: None,
@@ -1580,6 +1928,7 @@ mod tests {
                 workshop_id: None,
                 installed_path: "existing.vpk".to_string(),
                 installed_at: chrono::Utc::now(),
+                workshop_updated_at: None,
                 version: None,
                 checksum: None,
                 checksum_kind: None,
@@ -1589,6 +1938,56 @@ mod tests {
 
         let found = service.find_map_by_name("existing_map").await.unwrap();
         assert_eq!(found.unwrap().id, id);
+    }
+
+    #[test]
+    fn test_needs_workshop_update_stored_timestamp() {
+        let steam = chrono::Utc.timestamp_opt(2_000, 0).single().unwrap();
+        let stored = chrono::Utc.timestamp_opt(1_000, 0).single().unwrap();
+        assert!(needs_workshop_update(steam, Some(stored), None, false));
+        assert!(!needs_workshop_update(stored, Some(steam), None, false));
+    }
+
+    #[test]
+    fn test_needs_workshop_update_mtime_fallback() {
+        let steam = chrono::Utc.timestamp_opt(2_000, 0).single().unwrap();
+        let mtime = chrono::Utc.timestamp_opt(1_000, 0).single().unwrap();
+        assert!(needs_workshop_update(steam, None, Some(mtime), false));
+        assert!(!needs_workshop_update(mtime, None, Some(steam), false));
+    }
+
+    #[test]
+    fn test_needs_workshop_update_no_signals_defaults_outdated() {
+        let steam = chrono::Utc.timestamp_opt(1_000, 0).single().unwrap();
+        assert!(needs_workshop_update(steam, None, None, false));
+    }
+
+    #[test]
+    fn test_needs_workshop_update_force() {
+        let steam = chrono::Utc.timestamp_opt(1_000, 0).single().unwrap();
+        let stored = chrono::Utc.timestamp_opt(9_000, 0).single().unwrap();
+        assert!(needs_workshop_update(steam, Some(stored), None, true));
+    }
+
+    #[tokio::test]
+    async fn test_workshop_update_file_copy_overwrites_target() {
+        let (service, addons_dir, _) = setup_test_service().await;
+        let downloaded = addons_dir.path().join("workshop.vpk");
+        let payload = b"downloaded-workshop-bytes";
+        tokio::fs::write(&downloaded, payload).await.unwrap();
+
+        let target = addons_dir.path().join("installed.vpk");
+        tokio::fs::write(&target, b"old-bytes").await.unwrap();
+
+        let (source_vpk, cleanup) = service
+            .prepare_vpk_from_download(downloaded.clone())
+            .await
+            .unwrap();
+        tokio::fs::copy(&source_vpk, &target).await.unwrap();
+        cleanup.cleanup().await;
+
+        let on_disk = tokio::fs::read(&target).await.unwrap();
+        assert_eq!(on_disk, payload);
     }
 }
 

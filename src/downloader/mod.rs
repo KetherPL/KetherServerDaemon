@@ -12,5 +12,5 @@ pub use traits::Downloader;
 pub use client::HttpClient;
 pub use workshop::WorkshopDownloader;
 pub use zip::ZipDownloader;
-pub use steam::{SteamConnection, SteamError};
+pub use steam::{SteamConnection, SteamError, WorkshopFileDetails, steam_time_to_utc};
 

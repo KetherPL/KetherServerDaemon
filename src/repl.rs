@@ -6,7 +6,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use tokio::sync::mpsc;
 
-use crate::map_installer::{CompactReport, DiscoveryMode, DiscoveryReport, MapInstallationService};
+use crate::map_installer::{
+    CompactReport, DiscoveryMode, DiscoveryReport, MapInstallationService, WorkshopUpdateReport,
+};
 use crate::registry::{MapEntry, SourceKind};
 
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +72,9 @@ impl Repl {
                             "scan" | "discover" | "d" => {
                                 self.handle_discover(&runtime_handle, &args);
                             }
+                            "u" | "update" => {
+                                self.handle_update(&runtime_handle, &args);
+                            }
                             "compact" => {
                                 self.handle_compact(&runtime_handle);
                             }
@@ -130,7 +135,8 @@ impl Repl {
         println!("  ls, list, maps - List installed maps");
         println!("  i, install <url|workshop_id> [name] - Install a map");
         println!("  rm, remove, uninstall <id> - Remove map by ID");
-        println!("  scan, discover, d [u|U] - Scan addons dir; u=update changed, U=force update all");
+        println!("  u, update [id] [--force] - Re-download outdated Steam Workshop maps");
+        println!("  scan, discover, d [u|U] - Local addons scan (d u = refresh metadata only)");
         println!("  compact - Remove orphaned records, sort by name, reindex IDs from 1");
         println!("  info <id> - Show all stored fields for a map");
         println!("  modify <id> <field> <value> - Edit a field (name, source_url, version, source_kind, workshop_id)");
@@ -336,6 +342,59 @@ impl Repl {
             "  #{} | {} | version={} | source={} ({}) | path={}",
             map.id, map.name, version, source_kind, source, map.installed_path
         );
+        if let Some(updated_at) = map.workshop_updated_at {
+            println!("    workshop_updated_at: {updated_at}");
+        }
+    }
+
+    fn handle_update(&self, runtime_handle: &tokio::runtime::Handle, args: &[&str]) {
+        let Some(installer) = self.installer.as_ref() else {
+            eprintln!("Map installer unavailable.");
+            return;
+        };
+
+        let mut force = false;
+        let mut map_id = None;
+        for arg in args {
+            if *arg == "--force" {
+                force = true;
+            } else if let Ok(id) = arg.parse::<u64>() {
+                if map_id.is_some() {
+                    println!("Usage: update [id] [--force]");
+                    return;
+                }
+                map_id = Some(id);
+            } else {
+                println!("Usage: update [id] [--force]");
+                return;
+            }
+        }
+
+        match runtime_handle.block_on(installer.update_workshop_maps(map_id, force)) {
+            Ok(report) => self.print_workshop_update_report(&report),
+            Err(err) => eprintln!("Workshop update failed: {err}"),
+        }
+    }
+
+    fn print_workshop_update_report(&self, report: &WorkshopUpdateReport) {
+        println!(
+            "Workshop update complete: {} updated, {} skipped, {} failed, {} not workshop-linked",
+            report.updated.len(),
+            report.skipped,
+            report.failed.len(),
+            report.not_workshop
+        );
+
+        for map in &report.updated {
+            println!(
+                "  Updated #{}: {} ({})",
+                map.id, map.name, map.installed_path
+            );
+        }
+
+        for (map_id, error) in &report.failed {
+            eprintln!("  Failed #{}: {error}", map_id);
+        }
     }
 
     fn handle_info(&self, runtime_handle: &tokio::runtime::Handle, id_arg: Option<&str>) {
@@ -419,6 +478,9 @@ impl Repl {
         println!("  version:        {version}");
         println!("  installed_path: {}", map.installed_path);
         println!("  installed_at:   {}", map.installed_at);
+        if let Some(updated_at) = map.workshop_updated_at {
+            println!("  workshop_updated_at: {updated_at}");
+        }
         println!("  checksum:       {checksum}");
         println!("  checksum_kind:  {checksum_kind}");
     }

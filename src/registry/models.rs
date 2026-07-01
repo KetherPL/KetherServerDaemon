@@ -32,6 +32,10 @@ pub struct MapEntry {
     
     /// Installation timestamp
     pub installed_at: DateTime<Utc>,
+
+    /// Last known Steam Workshop file update time (from PublishedFileDetails.time_updated)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workshop_updated_at: Option<DateTime<Utc>>,
     
     /// Map version if available
     pub version: Option<String>,
@@ -58,6 +62,7 @@ impl MapEntry {
             workshop_id: None,
             installed_path,
             installed_at: Utc::now(),
+            workshop_updated_at: None,
             version: None,
             checksum: None,
             checksum_kind: None,
@@ -68,6 +73,7 @@ impl MapEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn test_map_entry_new() {
@@ -100,6 +106,7 @@ mod tests {
             workshop_id: Some(123456789),
             installed_path: "workshop/map.vpk".to_string(),
             installed_at: Utc::now(),
+            workshop_updated_at: None,
             version: Some("1.0.0".to_string()),
             checksum: Some("abc123def456".to_string()),
             checksum_kind: Some("md5".to_string()),
@@ -154,6 +161,7 @@ mod tests {
             workshop_id: None,
             installed_path: "map.vpk".to_string(),
             installed_at: Utc::now(),
+            workshop_updated_at: None,
             version: Some("1.0.0".to_string()),
             checksum: Some("abc123def456".to_string()),
             checksum_kind: Some("md5".to_string()),
@@ -183,6 +191,7 @@ mod tests {
             workshop_id: None,
             installed_path: "map.vpk".to_string(),
             installed_at: Utc::now(),
+            workshop_updated_at: None,
             version: None,
             checksum: None,
             checksum_kind: None,
@@ -196,6 +205,40 @@ mod tests {
         assert_eq!(deserialized.version, None);
         assert_eq!(deserialized.checksum, None);
         assert_eq!(deserialized.checksum_kind, None);
+    }
+
+    #[test]
+    fn test_workshop_updated_at_roundtrip_and_backward_compat() {
+        let with_ts = MapEntry {
+            id: 1,
+            name: "Workshop".to_string(),
+            source_url: String::new(),
+            source_kind: SourceKind::Workshop,
+            workshop_id: Some(123),
+            installed_path: "map.vpk".to_string(),
+            installed_at: Utc::now(),
+            workshop_updated_at: Some(Utc.timestamp_opt(1_700_000_000, 0).single().unwrap()),
+            version: None,
+            checksum: None,
+            checksum_kind: None,
+        };
+
+        let json = serde_json::to_string(&with_ts).unwrap();
+        assert!(json.contains("workshop_updated_at"));
+        let restored: MapEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.workshop_updated_at, with_ts.workshop_updated_at);
+
+        let legacy_json = r#"{
+            "id": 2,
+            "name": "Legacy",
+            "source_url": "",
+            "source_kind": "workshop",
+            "workshop_id": 456,
+            "installed_path": "legacy.vpk",
+            "installed_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let legacy: MapEntry = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.workshop_updated_at, None);
     }
 }
 

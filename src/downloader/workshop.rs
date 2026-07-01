@@ -7,7 +7,7 @@ use tracing::info;
 use uuid::Uuid;
 use crate::downloader::{
     client::HttpClient,
-    steam::{SteamConnection, SteamError},
+    steam::{SteamConnection, SteamError, WorkshopFileDetails},
     traits::Downloader,
 };
 
@@ -38,22 +38,48 @@ impl WorkshopDownloader {
     async fn download_workshop_item(&self, workshop_id: u64) -> anyhow::Result<PathBuf> {
         info!(workshop_id, "Starting Steam Workshop download");
         
-        // Get Steam connection (lazy-initialized, reused across calls)
         let steam = self.get_steam_connection().await?;
-        
-        // Step 1: Get hcontent from workshop ID
         let hcontent = steam
             .get_hcontent_from_workshop_id(workshop_id)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get hcontent: {}", e))?;
+
+        self.download_from_hcontent(workshop_id, hcontent).await
+    }
+
+    /// Download a workshop item when hcontent is already known (avoids a GetDetails round-trip).
+    pub async fn download_from_details(
+        &self,
+        detail: &WorkshopFileDetails,
+    ) -> anyhow::Result<PathBuf> {
+        self.download_from_hcontent(detail.workshop_id, detail.hcontent)
+            .await
+    }
+
+    /// Batch-fetch workshop metadata via Steam.
+    pub async fn get_workshop_file_details(
+        &self,
+        workshop_ids: &[u64],
+    ) -> anyhow::Result<Vec<WorkshopFileDetails>> {
+        let steam = self.get_steam_connection().await?;
+        steam
+            .get_workshop_file_details(workshop_ids)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get workshop file details: {}", e))
+    }
+
+    async fn download_from_hcontent(
+        &self,
+        workshop_id: u64,
+        hcontent: u64,
+    ) -> anyhow::Result<PathBuf> {
+        let steam = self.get_steam_connection().await?;
         
-        // Step 2: Get download URL from hcontent
         let download_url = steam
             .get_download_url(hcontent)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get download URL: {}", e))?;
         
-        // Step 3: Download file using existing HTTP client
         let filename = download_url
             .split('/')
             .last()
