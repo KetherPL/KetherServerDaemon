@@ -4,6 +4,6 @@ mod url_parser;
 
 pub use service::{
     needs_workshop_update, CompactReport, DiscoveryMode, DiscoveryReport,
-    MapInstallationService, WorkshopUpdateReport,
+    MapInstallationService, WorkshopUpdateAvailable, WorkshopUpdateReport,
 };
 

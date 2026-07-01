@@ -38,8 +38,15 @@ pub struct CompactReport {
     pub kept: Vec<MapEntry>,
 }
 
+pub struct WorkshopUpdateAvailable {
+    pub map: MapEntry,
+    pub workshop_id: u64,
+    pub steam_updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub struct WorkshopUpdateReport {
     pub updated: Vec<MapEntry>,
+    pub available: Vec<WorkshopUpdateAvailable>,
     pub skipped: usize,
     pub failed: Vec<(u64, String)>,
     pub not_workshop: usize,
@@ -1071,15 +1078,18 @@ impl MapInstallationService {
     }
 
     /// Re-download outdated Steam Workshop maps and replace installed files in place.
+    /// When `check_only` is true, lists outdated maps without downloading or modifying files.
     pub async fn update_workshop_maps(
         &self,
         map_id: Option<u64>,
         force: bool,
+        check_only: bool,
     ) -> anyhow::Result<WorkshopUpdateReport> {
         let _guard = self.op_lock.lock().await;
 
         let mut report = WorkshopUpdateReport {
             updated: Vec::new(),
+            available: Vec::new(),
             skipped: 0,
             failed: Vec::new(),
             not_workshop: 0,
@@ -1146,6 +1156,15 @@ impl MapInstallationService {
                 force,
             ) {
                 report.skipped += 1;
+                continue;
+            }
+
+            if check_only {
+                report.available.push(WorkshopUpdateAvailable {
+                    map: candidate.entry,
+                    workshop_id,
+                    steam_updated_at: steam_updated,
+                });
                 continue;
             }
 

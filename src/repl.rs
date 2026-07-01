@@ -135,7 +135,7 @@ impl Repl {
         println!("  ls, list, maps - List installed maps");
         println!("  i, install <url|workshop_id> [name] - Install a map");
         println!("  rm, remove, uninstall <id> - Remove map by ID");
-        println!("  u, update [id] [--force] - Re-download outdated Steam Workshop maps");
+        println!("  u, update [id] [--check] [--force] - Check or re-download outdated Steam Workshop maps");
         println!("  scan, discover, d [u|U] - Local addons scan (d u = refresh metadata only)");
         println!("  compact - Remove orphaned records, sort by name, reindex IDs from 1");
         println!("  info <id> - Show all stored fields for a map");
@@ -354,25 +354,64 @@ impl Repl {
         };
 
         let mut force = false;
+        let mut check_only = false;
         let mut map_id = None;
         for arg in args {
             if *arg == "--force" {
                 force = true;
+            } else if *arg == "--check" {
+                check_only = true;
             } else if let Ok(id) = arg.parse::<u64>() {
                 if map_id.is_some() {
-                    println!("Usage: update [id] [--force]");
+                    println!("Usage: update [id] [--check] [--force]");
                     return;
                 }
                 map_id = Some(id);
             } else {
-                println!("Usage: update [id] [--force]");
+                println!("Usage: update [id] [--check] [--force]");
                 return;
             }
         }
 
-        match runtime_handle.block_on(installer.update_workshop_maps(map_id, force)) {
-            Ok(report) => self.print_workshop_update_report(&report),
+        match runtime_handle.block_on(installer.update_workshop_maps(map_id, force, check_only)) {
+            Ok(report) => {
+                if check_only {
+                    self.print_workshop_check_report(&report);
+                } else {
+                    self.print_workshop_update_report(&report);
+                }
+            }
             Err(err) => eprintln!("Workshop update failed: {err}"),
+        }
+    }
+
+    fn print_workshop_check_report(&self, report: &WorkshopUpdateReport) {
+        println!(
+            "Workshop check: {} update(s) available, {} up to date, {} failed, {} not workshop-linked",
+            report.available.len(),
+            report.skipped,
+            report.failed.len(),
+            report.not_workshop
+        );
+
+        for item in &report.available {
+            let local = item
+                .map
+                .workshop_updated_at
+                .map(|ts| ts.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "  #{} | {} | workshop:{} | steam:{} | local:{}",
+                item.map.id,
+                item.map.name,
+                item.workshop_id,
+                item.steam_updated_at,
+                local
+            );
+        }
+
+        for (map_id, error) in &report.failed {
+            eprintln!("  Failed #{}: {error}", map_id);
         }
     }
 
