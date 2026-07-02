@@ -139,19 +139,6 @@ impl SteamConnection {
         Ok(details)
     }
     
-    /// Get hcontent handle from a workshop ID
-    pub async fn get_hcontent_from_workshop_id(
-        &self,
-        workshop_id: u64,
-    ) -> Result<u64, SteamError> {
-        let details = self.get_workshop_file_details(&[workshop_id]).await?;
-        details
-            .into_iter()
-            .find(|d| d.workshop_id == workshop_id)
-            .map(|d| d.hcontent)
-            .ok_or(SteamError::WorkshopIdNotFound(workshop_id))
-    }
-    
     /// Get download URL from hcontent handle, with retries on transient Steam timeouts.
     pub async fn get_download_url(&self, hcontent: u64) -> Result<String, SteamError> {
         let mut last_error = SteamError::Network(steam_vent::NetworkError::Timeout);

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use axum::extract::Path;
-use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info};
+
+use crate::api::error::ApiError;
 
 use crate::registry::{MapEntry, Registry};
 use crate::map_installer::{
@@ -83,12 +84,12 @@ impl ApiHandlers {
 impl ApiHandlers {
     pub async fn list_maps(
         &self,
-    ) -> Result<Json<ApiResponse<Vec<MapEntry>>>, StatusCode> {
+    ) -> Result<Json<ApiResponse<Vec<MapEntry>>>, ApiError> {
         match self.registry.list_maps().await {
             Ok(maps) => Ok(Json(ApiResponse::success(maps))),
             Err(e) => {
                 error!(error = %e, "Failed to list maps");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                Err(ApiError::internal(e.to_string()))
             }
         }
     }
@@ -96,19 +97,18 @@ impl ApiHandlers {
     pub async fn get_map(
         &self,
         Path(id): Path<String>,
-    ) -> Result<Json<ApiResponse<MapEntry>>, StatusCode> {
-        let map_id = id.parse::<u64>()
-            .map_err(|_| {
-                error!(id = %id, "Invalid map ID format (expected integer)");
-                StatusCode::BAD_REQUEST
-            })?;
+    ) -> Result<Json<ApiResponse<MapEntry>>, ApiError> {
+        let map_id = id.parse::<u64>().map_err(|_| {
+            error!(id = %id, "Invalid map ID format (expected integer)");
+            ApiError::bad_request("Invalid map ID format (expected integer)")
+        })?;
         
         match self.registry.get_map(map_id).await {
             Ok(Some(map)) => Ok(Json(ApiResponse::success(map))),
-            Ok(None) => Err(StatusCode::NOT_FOUND),
+            Ok(None) => Err(ApiError::not_found(format!("Map #{map_id} not found"))),
             Err(e) => {
                 error!(error = %e, "Failed to get map");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                Err(ApiError::internal(e.to_string()))
             }
         }
     }
@@ -116,33 +116,36 @@ impl ApiHandlers {
     pub async fn install_map(
         &self,
         Json(request): Json<InstallMapRequest>,
-    ) -> Result<Json<ApiResponse<u64>>, StatusCode> {
+    ) -> Result<Json<ApiResponse<u64>>, ApiError> {
         // Validate that exactly one of url or workshop_id is provided
         match (request.url.as_ref(), request.workshop_id) {
             (Some(_), Some(_)) => {
                 error!("Both url and workshop_id provided, but only one is allowed");
-                return Err(StatusCode::BAD_REQUEST);
+                Err(ApiError::bad_request(
+                    "Both url and workshop_id provided, but only one is allowed",
+                ))
             }
             (None, None) => {
                 error!("Neither url nor workshop_id provided, one is required");
-                return Err(StatusCode::BAD_REQUEST);
+                Err(ApiError::bad_request(
+                    "Neither url nor workshop_id provided, one is required",
+                ))
             }
             (Some(url), None) => {
                 info!(url = %url, "Install map request received with URL");
                 
-                // Validate URL length
                 if url.len() > 2048 {
                     error!("URL too long: {} characters", url.len());
-                    return Err(StatusCode::BAD_REQUEST);
+                    return Err(ApiError::bad_request("URL too long (max 2048 characters)"));
                 }
                 
-                // Validate map name length if provided
-                if let Some(ref name) = request.name {
-                    if name.len() > 255 {
+                if let Some(ref name) = request.name
+                    && name.len() > 255 {
                         error!("Map name too long: {} characters", name.len());
-                        return Err(StatusCode::BAD_REQUEST);
+                        return Err(ApiError::bad_request(
+                            "Map name too long (max 255 characters)",
+                        ));
                     }
-                }
                 
                 // Install from URL
                 match self.installer.install_from_url(url.clone(), request.name).await {
@@ -152,7 +155,7 @@ impl ApiHandlers {
                     }
                     Err(e) => {
                         error!(error = %e, "Failed to install map");
-                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                        Err(ApiError::internal(e.to_string()))
                     }
                 }
             }
@@ -160,12 +163,13 @@ impl ApiHandlers {
                 info!(workshop_id, "Install map request received with workshop ID");
                 
                 // Validate map name length if provided
-                if let Some(ref name) = request.name {
-                    if name.len() > 255 {
+                if let Some(ref name) = request.name
+                    && name.len() > 255 {
                         error!("Map name too long: {} characters", name.len());
-                        return Err(StatusCode::BAD_REQUEST);
+                        return Err(ApiError::bad_request(
+                            "Map name too long (max 255 characters)",
+                        ));
                     }
-                }
                 
                 // Install from workshop ID
                 match self.installer.install_from_workshop_id(workshop_id, request.name).await {
@@ -175,7 +179,7 @@ impl ApiHandlers {
                     }
                     Err(e) => {
                         error!(error = %e, "Failed to install map");
-                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                        Err(ApiError::internal(e.to_string()))
                     }
                 }
             }
@@ -185,12 +189,11 @@ impl ApiHandlers {
     pub async fn uninstall_map(
         &self,
         Path(id): Path<String>,
-    ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-        let map_id = id.parse::<u64>()
-            .map_err(|_| {
-                error!(id = %id, "Invalid map ID format (expected integer)");
-                StatusCode::BAD_REQUEST
-            })?;
+    ) -> Result<Json<ApiResponse<()>>, ApiError> {
+        let map_id = id.parse::<u64>().map_err(|_| {
+            error!(id = %id, "Invalid map ID format (expected integer)");
+            ApiError::bad_request("Invalid map ID format (expected integer)")
+        })?;
         
         match self.installer.uninstall_map(map_id).await {
             Ok(()) => {
@@ -199,7 +202,7 @@ impl ApiHandlers {
             }
             Err(e) => {
                 error!(error = %e, "Failed to uninstall map");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                Err(ApiError::internal(e.to_string()))
             }
         }
     }
@@ -207,7 +210,7 @@ impl ApiHandlers {
     pub async fn update_workshop_maps(
         &self,
         Json(request): Json<UpdateWorkshopRequest>,
-    ) -> Result<Json<ApiResponse<WorkshopUpdateReport>>, StatusCode> {
+    ) -> Result<Json<ApiResponse<WorkshopUpdateReport>>, ApiError> {
         info!(
             map_id = ?request.map_id,
             force = request.force,
@@ -225,10 +228,10 @@ impl ApiHandlers {
                 let message = e.to_string();
                 if message.contains("not found") {
                     error!(error = %message, "Workshop update target not found");
-                    return Err(StatusCode::NOT_FOUND);
+                    return Err(ApiError::not_found(message));
                 }
                 error!(error = %message, "Workshop update failed");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                Err(ApiError::internal(message))
             }
         }
     }
@@ -236,28 +239,28 @@ impl ApiHandlers {
     pub async fn discover_maps(
         &self,
         Json(request): Json<DiscoverRequest>,
-    ) -> Result<Json<ApiResponse<DiscoveryReport>>, StatusCode> {
+    ) -> Result<Json<ApiResponse<DiscoveryReport>>, ApiError> {
         info!(mode = ?request.mode, "Discover maps request received");
 
         match self.installer.discover_maps(request.mode).await {
             Ok(report) => Ok(Json(ApiResponse::success(report))),
             Err(e) => {
                 error!(error = %e, "Discovery failed");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                Err(ApiError::internal(e.to_string()))
             }
         }
     }
 
     pub async fn compact_registry(
         &self,
-    ) -> Result<Json<ApiResponse<CompactReport>>, StatusCode> {
+    ) -> Result<Json<ApiResponse<CompactReport>>, ApiError> {
         info!("Compact registry request received");
 
         match self.installer.compact_registry().await {
             Ok(report) => Ok(Json(ApiResponse::success(report))),
             Err(e) => {
                 error!(error = %e, "Compact failed");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                Err(ApiError::internal(e.to_string()))
             }
         }
     }
@@ -266,20 +269,20 @@ impl ApiHandlers {
         &self,
         Path(id): Path<String>,
         Json(request): Json<ModifyMapRequest>,
-    ) -> Result<Json<ApiResponse<MapEntry>>, StatusCode> {
+    ) -> Result<Json<ApiResponse<MapEntry>>, ApiError> {
         let map_id = id.parse::<u64>().map_err(|_| {
             error!(id = %id, "Invalid map ID format (expected integer)");
-            StatusCode::BAD_REQUEST
+            ApiError::bad_request("Invalid map ID format (expected integer)")
         })?;
 
         if request.field.is_empty() {
             error!("Modify request missing field name");
-            return Err(StatusCode::BAD_REQUEST);
+            return Err(ApiError::bad_request("Modify request missing field name"));
         }
 
         if request.value.len() > 2048 {
             error!("Modify value too long: {} characters", request.value.len());
-            return Err(StatusCode::BAD_REQUEST);
+            return Err(ApiError::bad_request("Modify value too long (max 2048 characters)"));
         }
 
         info!(map_id, field = %request.field, "Modify map request received");
@@ -294,17 +297,17 @@ impl ApiHandlers {
                 let message = e.to_string();
                 if message.contains("not found") {
                     error!(map_id, error = %message, "Map not found for modify");
-                    return Err(StatusCode::NOT_FOUND);
+                    return Err(ApiError::not_found(message));
                 }
                 if message.contains("Unknown or read-only field")
                     || message.contains("Invalid source_kind")
                     || message.contains("Invalid workshop_id")
                 {
                     error!(map_id, error = %message, "Invalid modify field or value");
-                    return Err(StatusCode::BAD_REQUEST);
+                    return Err(ApiError::bad_request(message));
                 }
                 error!(map_id, error = %message, "Failed to modify map");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                Err(ApiError::internal(e.to_string()))
             }
         }
     }
@@ -391,7 +394,7 @@ mod tests {
             )
             .await;
 
-        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+        assert_eq!(result.unwrap_err().status_code(), axum::http::StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -409,7 +412,7 @@ mod tests {
             )
             .await;
 
-        assert_eq!(result.unwrap_err(), StatusCode::BAD_REQUEST);
+        assert_eq!(result.unwrap_err().status_code(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -472,6 +475,84 @@ mod tests {
             }))
             .await;
 
-        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+        assert_eq!(result.unwrap_err().status_code(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_list_maps_returns_entries() {
+        let (handlers, registry, _dirs) = setup_handlers().await;
+        let id = registry.add_map(sample_map()).await.unwrap();
+
+        let response = handlers.list_maps().await.unwrap();
+        assert!(response.0.success);
+        let maps = response.0.data.unwrap();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].id, id);
+    }
+
+    #[tokio::test]
+    async fn test_get_map_success() {
+        let (handlers, registry, _dirs) = setup_handlers().await;
+        let id = registry.add_map(sample_map()).await.unwrap();
+
+        let response = handlers.get_map(Path(id.to_string())).await.unwrap();
+        assert!(response.0.success);
+        assert_eq!(response.0.data.unwrap().id, id);
+    }
+
+    #[tokio::test]
+    async fn test_get_map_invalid_id() {
+        let (handlers, _registry, _dirs) = setup_handlers().await;
+
+        let result = handlers.get_map(Path("not-a-number".to_string())).await;
+        assert_eq!(result.unwrap_err().status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_install_map_validation_both_sources() {
+        let (handlers, _registry, _dirs) = setup_handlers().await;
+
+        let result = handlers
+            .install_map(Json(InstallMapRequest {
+                url: Some("https://example.com/map.zip".to_string()),
+                workshop_id: Some(123),
+                name: None,
+            }))
+            .await;
+
+        assert_eq!(result.unwrap_err().status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_install_map_validation_neither_source() {
+        let (handlers, _registry, _dirs) = setup_handlers().await;
+
+        let result = handlers
+            .install_map(Json(InstallMapRequest {
+                url: None,
+                workshop_id: None,
+                name: None,
+            }))
+            .await;
+
+        assert_eq!(result.unwrap_err().status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_uninstall_map_success() {
+        let (handlers, registry, _dirs) = setup_handlers().await;
+        let id = registry.add_map(sample_map()).await.unwrap();
+
+        let response = handlers.uninstall_map(Path(id.to_string())).await.unwrap();
+        assert!(response.0.success);
+        assert!(registry.get_map(id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_uninstall_map_invalid_id() {
+        let (handlers, _registry, _dirs) = setup_handlers().await;
+
+        let result = handlers.uninstall_map(Path("abc".to_string())).await;
+        assert_eq!(result.unwrap_err().status_code(), axum::http::StatusCode::BAD_REQUEST);
     }
 }

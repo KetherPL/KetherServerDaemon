@@ -34,6 +34,7 @@ use repl::{DaemonCommand, start_key_listener};
 async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = Config::load()?;
+    config.validate()?;
     
     // Initialize logging
     setup_logging(&config.log_level)?;

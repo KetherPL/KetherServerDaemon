@@ -31,7 +31,7 @@ impl Downloader for ZipDownloader {
         // Extract filename from URL and sanitize it
         let raw_filename = url
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or("download.zip");
         
         // Sanitize filename to prevent path traversal

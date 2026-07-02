@@ -69,8 +69,12 @@ impl InotifyWatcher {
                         _ => continue,
                     };
                     
-                    if let Err(e) = event_tx.try_send(event_type) {
-                        warn!(error = %e, "Failed to send watcher event, receiver may be closed");
+                    if let Err(e) = event_tx.try_send(event_type.clone()) {
+                        warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "Dropped watcher event, channel full or receiver closed"
+                        );
                     }
                 }
             }

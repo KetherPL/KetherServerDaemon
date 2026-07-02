@@ -5,7 +5,7 @@ use axum::{
     body::Body,
     http::StatusCode,
     response::Response,
-    routing::get,
+    routing::{get, post},
 };
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, MutexGuard};
@@ -68,6 +68,21 @@ async fn spawn_local_server() -> LocalTestServer {
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(Body::empty())
                     .unwrap()
+            }),
+        )
+        .route(
+            "/steam/GetPublishedFileDetails/v1/",
+            post(|| async {
+                (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "response": {
+                            "publishedfiledetails": [{
+                                "file_url": "https://cdn.steamusercontent.com/ugc/15796922369319871036/71E2E9A2C09C7D8A82E9DE8F4DAAC044B62FD00E/"
+                            }]
+                        }
+                    })),
+                )
             }),
         );
 

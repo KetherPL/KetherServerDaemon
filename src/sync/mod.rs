@@ -2,6 +2,6 @@
 pub mod traits;
 pub mod backend;
 
-pub use traits::{MapUpdate, SyncService};
+pub use traits::SyncService;
 pub use backend::BackendSyncService;
 

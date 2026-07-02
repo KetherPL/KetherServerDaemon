@@ -44,13 +44,12 @@ pub fn validate_url(url_str: &str) -> Result<()> {
         }
         
         // Try to parse as IP address
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            if is_private_ip(&ip) {
+        if let Ok(ip) = host.parse::<IpAddr>()
+            && is_private_ip(&ip) {
                 return Err(anyhow::anyhow!(
                     "URL contains private/internal IP address (not allowed for security reasons)"
                 ));
             }
-        }
     } else {
         return Err(anyhow::anyhow!("URL must have a host"));
     }

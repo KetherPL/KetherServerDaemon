@@ -33,8 +33,8 @@ pub fn schedule_pending(
     now: Instant,
     debounce_window: Duration,
 ) {
-    if pending.len() >= MAX_PENDING && !pending.contains_key(&path) {
-        if let Some(oldest_path) = pending
+    if pending.len() >= MAX_PENDING && !pending.contains_key(&path)
+        && let Some(oldest_path) = pending
             .iter()
             .min_by_key(|(_, entry)| entry.first_seen)
             .map(|(p, _)| p.clone())
@@ -47,7 +47,6 @@ pub fn schedule_pending(
             pending.remove(&oldest_path);
             last_unstable_log.remove(&oldest_path);
         }
-    }
 
     pending
         .entry(path)

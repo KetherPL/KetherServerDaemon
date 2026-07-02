@@ -106,6 +106,31 @@ impl Config {
     pub fn addons_dir(&self) -> PathBuf {
         self.l4d2_server_dir.join("left4dead2").join("addons")
     }
+
+    /// Validate configuration before starting services.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.sync_interval_secs == 0 {
+            anyhow::bail!("sync_interval_secs must be greater than 0");
+        }
+
+        let allowed_levels = ["trace", "debug", "info", "warn", "error"];
+        if !allowed_levels.contains(&self.log_level.to_lowercase().as_str()) {
+            anyhow::bail!(
+                "Invalid log_level '{}', expected one of: {}",
+                self.log_level,
+                allowed_levels.join(", ")
+            );
+        }
+
+        if !self.local_api_bind.ip().is_loopback() {
+            tracing::warn!(
+                addr = %self.local_api_bind,
+                "local_api_bind is not loopback; the HTTP API will be reachable on the network without authentication"
+            );
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for Config {
@@ -365,6 +390,26 @@ log_level = "debug"
         } else {
             remove_env_var("KETHER_LOG_LEVEL");
         }
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_sync_interval() {
+        let (mut config, _dir) = crate::test_helpers::create_test_config();
+        config.sync_interval_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_log_level() {
+        let (mut config, _dir) = crate::test_helpers::create_test_config();
+        config.log_level = "verbose".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_valid_config() {
+        let (config, _dir) = crate::test_helpers::create_test_config();
+        assert!(config.validate().is_ok());
     }
 }
 

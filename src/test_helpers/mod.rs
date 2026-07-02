@@ -93,3 +93,55 @@ impl TestDirs {
         }
     }
 }
+
+/// Write a minimal valid VPK v1 with embedded `addoninfo.txt` for install/discovery tests.
+#[cfg(test)]
+pub fn write_minimal_test_vpk(path: &Path, title: &str) -> anyhow::Result<()> {
+    use crc::{Crc, CRC_32_ISO_HDLC};
+    use sourcepak::common::format::PakReader;
+    use sourcepak::common::file::VPKFileWriter;
+    use sourcepak::common::format::{PakWriter, VPKDirectoryEntry, VPKTree};
+    use sourcepak::pak::v1::format::{
+        VPKHeaderV1, VPKVersion1, VPK_SIGNATURE_V1, VPK_VERSION_V1,
+    };
+    use std::fs::File;
+
+    let content = format!("\"addonTitle\" \"{title}\"\n\"addonVersion\" \"1.0\"\n");
+    let content_bytes = content.as_bytes();
+    let crc_val = Crc::<u32>::new(&CRC_32_ISO_HDLC).checksum(content_bytes);
+
+    let file_key = " /addoninfo.txt".to_string();
+    let entry = VPKDirectoryEntry {
+        crc: crc_val,
+        preload_length: content_bytes.len() as u16,
+        archive_index: 0,
+        entry_offset: 0,
+        entry_length: 0,
+        terminator: 0xFFFF,
+    };
+
+    let mut tree = VPKTree::new();
+    tree.files.insert(file_key.clone(), entry);
+    tree.preload.insert(file_key, content_bytes.to_vec());
+
+    let tree_temp = tempfile::NamedTempFile::new()?;
+    {
+        let mut tree_file = File::create(tree_temp.path())?;
+        tree.write(&mut tree_file)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    let tree_size = std::fs::metadata(tree_temp.path())?.len() as u32;
+
+    let mut vpk = VPKVersion1::new();
+    vpk.header = VPKHeaderV1 {
+        signature: VPK_SIGNATURE_V1,
+        version: VPK_VERSION_V1,
+        tree_size,
+    };
+    vpk.tree = tree;
+
+    let output_path = path.to_string_lossy().into_owned();
+    vpk.write_dir(&output_path)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
+}

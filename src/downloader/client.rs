@@ -20,7 +20,7 @@ impl HttpClient {
             .no_gzip()
             .no_brotli()
             .no_deflate()
-            .user_agent("KetherServerDaemon/0.0.1")
+            .user_agent(format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
             .build()?;
         
         Ok(Self {
@@ -69,15 +69,14 @@ impl HttpClient {
         response.error_for_status_ref()?;
         
         // Check Content-Length header if available
-        if let Some(content_length) = response.content_length() {
-            if content_length > self.max_download_size {
+        if let Some(content_length) = response.content_length()
+            && content_length > self.max_download_size {
                 return Err(anyhow::anyhow!(
                     "File size {} exceeds maximum download size {} bytes",
                     content_length,
                     self.max_download_size
                 ));
             }
-        }
         
         // Stream download to check size during transfer
         use tokio::io::AsyncWriteExt;

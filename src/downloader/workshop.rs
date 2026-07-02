@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use crate::downloader::{
     client::HttpClient,
-    steam::{SteamConnection, SteamError, WorkshopFileDetails},
+    steam::{SteamConnection, WorkshopFileDetails},
     traits::Downloader,
 };
 
@@ -20,6 +20,8 @@ pub struct WorkshopDownloader {
     temp_dir: PathBuf,
     max_download_size_bytes: u64,
     steam_connection: Arc<Mutex<Option<SteamConnection>>>,
+    /// Override for tests (local mock Steam Web API).
+    published_file_details_url: String,
 }
 
 impl WorkshopDownloader {
@@ -29,7 +31,19 @@ impl WorkshopDownloader {
             temp_dir,
             max_download_size_bytes,
             steam_connection: Arc::new(Mutex::new(None)),
+            published_file_details_url: STEAM_PUBLISHED_FILE_DETAILS_URL.to_string(),
         })
+    }
+
+    #[cfg(test)]
+    pub fn with_published_file_details_url(
+        temp_dir: PathBuf,
+        max_download_size_bytes: u64,
+        published_file_details_url: String,
+    ) -> anyhow::Result<Self> {
+        let mut downloader = Self::new(temp_dir, max_download_size_bytes)?;
+        downloader.published_file_details_url = published_file_details_url;
+        Ok(downloader)
     }
 
     async fn connect_steam(&self) -> anyhow::Result<SteamConnection> {
@@ -156,7 +170,7 @@ impl WorkshopDownloader {
         let response = self
             .client
             .client()
-            .post(STEAM_PUBLISHED_FILE_DETAILS_URL)
+            .post(&self.published_file_details_url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body)
             .send()
@@ -205,9 +219,9 @@ impl WorkshopDownloader {
         let filename = download_url
             .trim_end_matches('/')
             .split('/')
-            .last()
+            .next_back()
             .filter(|segment| !segment.is_empty())
-            .unwrap_or_else(|| "workshop_download")
+            .unwrap_or("workshop_download")
             .split('?')
             .next()
             .unwrap_or("workshop_download");
@@ -301,8 +315,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_file_url_via_web_api_returns_url_for_known_item() {
+        let http = acquire_http_test_lock().await;
         let temp_dir = TempDir::new().unwrap();
-        let downloader = WorkshopDownloader::new(temp_dir.path().to_path_buf(), 100 * 1024 * 1024).unwrap();
+        let api_url = http.url("/steam/GetPublishedFileDetails/v1/");
+        let downloader = WorkshopDownloader::with_published_file_details_url(
+            temp_dir.path().to_path_buf(),
+            100 * 1024 * 1024,
+            api_url,
+        )
+        .unwrap();
 
         let url = downloader
             .fetch_file_url_via_web_api(3726403340)

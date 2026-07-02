@@ -79,13 +79,10 @@ pub fn validate_path_within_base_new(path: &Path, base: &Path) -> Result<()> {
     
     // Check if any component tries to go up
     for component in normalized.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                return Err(anyhow::anyhow!(
-                    "Path contains parent directory reference (..)"
-                ));
-            }
-            _ => {}
+        if component == std::path::Component::ParentDir {
+            return Err(anyhow::anyhow!(
+                "Path contains parent directory reference (..)"
+            ));
         }
     }
     

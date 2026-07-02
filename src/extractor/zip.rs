@@ -32,7 +32,7 @@ impl Extractor for ZipExtractor {
         let dest_clone = dest.clone();
         
         // Canonicalize destination for path validation
-        let dest_canonical = std::fs::canonicalize(&dest_clone)
+        let _dest_canonical = std::fs::canonicalize(&dest_clone)
             .or_else(|_| {
                 // If destination doesn't exist yet, create it and canonicalize parent
                 std::fs::create_dir_all(&dest_clone)?;
@@ -116,11 +116,10 @@ impl Extractor for ZipExtractor {
                         ));
                     }
                     
-                    if let Some(p) = outpath.parent() {
-                        if !p.exists() {
+                    if let Some(p) = outpath.parent()
+                        && !p.exists() {
                             std::fs::create_dir_all(p)?;
                         }
-                    }
                     let mut outfile = File::create(&outpath)?;
                     std::io::copy(&mut file, &mut outfile)?;
                 }

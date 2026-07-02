@@ -83,21 +83,18 @@ impl VpkExtractor {
         let mut addon_url: Option<String> = None;
 
         for line in content.lines() {
-            if title.is_none() {
-                if let Some(val) = Self::extract_value(line, "addonTitle") {
+            if title.is_none()
+                && let Some(val) = Self::extract_value(line, "addonTitle") {
                     title = Some(val);
                 }
-            }
-            if version.is_none() {
-                if let Some(val) = Self::extract_value(line, "addonVersion") {
+            if version.is_none()
+                && let Some(val) = Self::extract_value(line, "addonVersion") {
                     version = Some(val);
                 }
-            }
-            if addon_url.is_none() {
-                if let Some(val) = Self::extract_value(line, "addonURL0") {
+            if addon_url.is_none()
+                && let Some(val) = Self::extract_value(line, "addonURL0") {
                     addon_url = Some(val);
                 }
-            }
         }
         let workshop_id = addon_url
             .as_deref()

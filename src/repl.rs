@@ -542,8 +542,7 @@ pub async fn start_key_listener(
             loop {
                 if let Ok(true) = event::poll(std::time::Duration::from_millis(100))
                     && let Ok(Event::Key(key_event)) = event::read()
-                {
-                    if key_event.kind == KeyEventKind::Press {
+                    && key_event.kind == KeyEventKind::Press {
                         match key_event.code {
                             KeyCode::Char('c') | KeyCode::Char('C') => {
                                 return true;
@@ -551,7 +550,6 @@ pub async fn start_key_listener(
                             _ => {}
                         }
                     }
-                }
             }
         })
         .await

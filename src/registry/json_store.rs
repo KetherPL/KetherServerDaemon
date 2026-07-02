@@ -178,7 +178,7 @@ impl JsonRegistry {
             source_kind: data.source_kind,
             workshop_id: Self::normalize_workshop_id(data.source_kind, data.workshop_id),
             installed_path: data.installed_path.clone(),
-            installed_at: data.installed_at.clone(),
+            installed_at: data.installed_at,
             workshop_updated_at: data.workshop_updated_at,
             version: data.version.clone(),
             checksum: data.checksum.clone(),
