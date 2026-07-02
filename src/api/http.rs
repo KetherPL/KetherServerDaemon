@@ -19,9 +19,10 @@ impl HttpServer {
         registry: Arc<dyn Registry>,
         installer: Arc<MapInstallationService>,
         addr: SocketAddr,
+        l4d2center_index_url: String,
     ) -> Self {
         Self {
-            handlers: ApiHandlers::new(registry, installer),
+            handlers: ApiHandlers::new(registry, installer, l4d2center_index_url),
             addr,
         }
     }

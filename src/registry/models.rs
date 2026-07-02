@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum SourceKind {
     Workshop,
     SirPlease,
+    L4d2Center,
     Other,
 }
 

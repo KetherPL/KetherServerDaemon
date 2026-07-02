@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+mod l4d2center;
 mod maintenance;
 mod maps;
 
@@ -17,13 +18,19 @@ use crate::registry::Registry;
 pub struct ApiHandlers {
     pub(super) registry: Arc<dyn Registry>,
     pub(super) installer: Arc<MapInstallationService>,
+    pub(super) l4d2center_index_url: String,
 }
 
 impl ApiHandlers {
-    pub fn new(registry: Arc<dyn Registry>, installer: Arc<MapInstallationService>) -> Self {
+    pub fn new(
+        registry: Arc<dyn Registry>,
+        installer: Arc<MapInstallationService>,
+        l4d2center_index_url: String,
+    ) -> Self {
         Self {
             registry,
             installer,
+            l4d2center_index_url,
         }
     }
 }

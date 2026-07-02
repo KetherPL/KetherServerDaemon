@@ -16,6 +16,7 @@ pub struct Repl {
     prompt: DefaultPrompt,
     pub(super) daemon_command_tx: Option<mpsc::UnboundedSender<DaemonCommand>>,
     pub(super) installer: Option<Arc<MapInstallationService>>,
+    pub(super) l4d2center_index_url: String,
 }
 
 impl Repl {
@@ -33,12 +34,14 @@ impl Repl {
             prompt,
             daemon_command_tx: None,
             installer: None,
+            l4d2center_index_url: String::new(),
         }
     }
 
     pub fn new_with_command_tx(
         daemon_command_tx: mpsc::UnboundedSender<DaemonCommand>,
         installer: Arc<MapInstallationService>,
+        l4d2center_index_url: String,
     ) -> Self {
         let (editor, prompt) = Self::create_editor();
         Self {
@@ -46,6 +49,7 @@ impl Repl {
             prompt,
             daemon_command_tx: Some(daemon_command_tx),
             installer: Some(installer),
+            l4d2center_index_url,
         }
     }
 
@@ -87,6 +91,9 @@ impl Repl {
                             }
                             "modify" => {
                                 self.handle_modify(&runtime_handle, &args);
+                            }
+                            "l4d2center" | "l4c" => {
+                                self.handle_l4d2center(&runtime_handle, &args);
                             }
                             "q" | "quit" | "exit" => {
                                 println!("Exiting REPL...");
@@ -144,6 +151,9 @@ impl Repl {
         println!("  compact - Remove orphaned records, sort by name, reindex IDs from 1");
         println!("  info <id> - Show all stored fields for a map");
         println!("  modify <id> <field> <value> - Edit a field (name, source_url, version, source_kind, workshop_id)");
+        println!("  l4d2center, l4c list - List L4D2Center catalog maps and install status");
+        println!("  l4d2center install <name> - Install a map from the L4D2Center catalog");
+        println!("  l4d2center update [id|name] [--check] [--force] - Check or update L4D2Center maps");
         println!("  q, quit, exit - Exit the REPL");
         println!("  S, stop - Stop the daemon");
     }

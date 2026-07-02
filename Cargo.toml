@@ -49,6 +49,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # ZIP extraction
 zip = "0.6"
 
+# 7z extraction (L4D2Center maps)
+sevenz-rust = "0.6"
+
 # Regex for parsing VPK metadata
 regex = "1.10"
 

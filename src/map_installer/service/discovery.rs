@@ -5,9 +5,9 @@ use anyhow::Context;
 use tracing::{info, warn};
 
 use super::{
-    helpers, workshop_source_url, CompactReport, DiscoveryMode, DiscoveryReport,
-    MapInstallationService,
+    CompactReport, DiscoveryMode, DiscoveryReport, MapInstallationService,
 };
+use crate::map_installer::helpers::{self, workshop_source_url};
 use crate::registry::models::{MapEntry, SourceKind};
 
 impl MapInstallationService {
@@ -227,6 +227,7 @@ impl MapInstallationService {
         match value.to_lowercase().as_str() {
             "workshop" => Ok(SourceKind::Workshop),
             "sirplease" => Ok(SourceKind::SirPlease),
+            "l4d2center" => Ok(SourceKind::L4d2Center),
             "other" => Ok(SourceKind::Other),
             other => Err(anyhow::anyhow!(
                 "Invalid source_kind '{other}' (expected: workshop, sirplease, other)"

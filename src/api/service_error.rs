@@ -13,6 +13,19 @@ pub fn classify_workshop_error(err: anyhow::Error) -> ApiError {
     ApiError::internal(message)
 }
 
+pub fn classify_l4d2center_error(err: anyhow::Error) -> ApiError {
+    let message = err.to_string();
+    if message.contains("not found in L4D2Center catalog")
+        || message.contains("not installed")
+        || (message.contains("Map #") && message.contains("not found"))
+    {
+        error!(error = %message, "L4D2Center request target not found");
+        return ApiError::not_found(message);
+    }
+    error!(error = %message, "L4D2Center operation failed");
+    ApiError::internal(message)
+}
+
 pub fn classify_modify_error(err: anyhow::Error) -> ApiError {
     let message = err.to_string();
     if message.contains("not found") {

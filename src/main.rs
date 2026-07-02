@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 mod api;
+mod catalog;
 mod config;
 mod downloader;
 mod extractor;
@@ -273,7 +274,13 @@ async fn main() -> anyhow::Result<()> {
     let registry_http = Arc::clone(&registry);
     let installer_http = Arc::clone(&installer);
     let http_addr = config.local_api_bind;
-    let http_server = HttpServer::new(registry_http, installer_http, http_addr);
+    let l4d2center_index_url = config.l4d2center_index_url.clone();
+    let http_server = HttpServer::new(
+        registry_http,
+        installer_http,
+        http_addr,
+        l4d2center_index_url.clone(),
+    );
     let http_task = tokio::spawn(async move {
         if let Err(e) = http_server.serve().await {
             error!(error = %e, "HTTP server error");
@@ -283,7 +290,7 @@ async fn main() -> anyhow::Result<()> {
     let repl_tx = daemon_tx.clone();
     let repl_installer = Arc::clone(&installer);
     let repl_task = tokio::spawn(async move {
-        if let Err(e) = start_key_listener(repl_tx, repl_installer).await {
+        if let Err(e) = start_key_listener(repl_tx, repl_installer, l4d2center_index_url).await {
             error!(error = %e, "REPL key listener error");
         }
     });

@@ -120,6 +120,10 @@ impl Extractor for VpkExtractor {
         info!("VPK files do not require extraction - they are used directly by the game");
         Ok(())
     }
+
+    async fn extract_sevenz(&self, _archive_path: PathBuf, _dest: PathBuf) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("7z extraction not supported by VpkExtractor"))
+    }
     
     async fn extract_vpk_metadata(&self, archive_path: PathBuf) -> anyhow::Result<VpkMetadata> {
         tokio::task::spawn_blocking(move || {

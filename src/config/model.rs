@@ -39,6 +39,10 @@ pub struct Config {
     /// Maximum number of files in an archive (default: 10000)
     #[serde(default = "default_max_extraction_file_count")]
     pub max_extraction_file_count: u64,
+
+    /// L4D2Center server map catalog index URL
+    #[serde(default = "default_l4d2center_index_url")]
+    pub l4d2center_index_url: String,
 }
 
 fn default_max_download_size() -> u64 {
@@ -51,6 +55,10 @@ fn default_max_extraction_size() -> u64 {
 
 fn default_max_extraction_file_count() -> u64 {
     10000
+}
+
+fn default_l4d2center_index_url() -> String {
+    "https://l4d2center.com/maps/servers/index.json".to_string()
 }
 
 impl Default for Config {
@@ -66,6 +74,7 @@ impl Default for Config {
             max_download_size_bytes: default_max_download_size(),
             max_extraction_size_bytes: default_max_extraction_size(),
             max_extraction_file_count: default_max_extraction_file_count(),
+            l4d2center_index_url: default_l4d2center_index_url(),
         }
     }
 }

@@ -3,6 +3,7 @@ mod helpers;
 mod service;
 
 pub use service::{
-    CompactReport, DiscoveryMode, DiscoveryReport, MapInstallationService, WorkshopUpdateReport,
+    CompactReport, DiscoveryMode, DiscoveryReport, L4d2CenterUpdateReport,
+    MapInstallationService, WorkshopUpdateReport,
 };
 

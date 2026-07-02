@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use super::format::{
-    print_compact_report, print_discovery_report, print_map_detail, print_map_entry,
-    print_workshop_check_report, print_workshop_update_report,
+    print_compact_report, print_discovery_report, print_l4d2center_catalog,
+    print_l4d2center_check_report, print_l4d2center_update_report, print_map_detail,
+    print_map_entry, print_workshop_check_report, print_workshop_update_report,
 };
 use super::parse::{
-    parse_discovery_mode, parse_install_source, parse_map_id, parse_update_args, InstallTarget,
+    parse_discovery_mode, parse_install_source, parse_l4d2center_subcommand, parse_map_id,
+    parse_update_args, InstallTarget, L4d2CenterSubcommand,
 };
 use super::session::Repl;
 use super::runtime::{block_on_installer, require_installer};
@@ -240,6 +242,81 @@ impl Repl {
                 print_map_detail(&map);
             }
             Err(err) => eprintln!("Modify failed: {err}"),
+        }
+    }
+
+    pub(super) fn handle_l4d2center(
+        &self,
+        runtime_handle: &tokio::runtime::Handle,
+        args: &[&str],
+    ) {
+        let Some(installer) = require_installer(&self.installer) else {
+            return;
+        };
+
+        if self.l4d2center_index_url.is_empty() {
+            eprintln!("L4D2Center index URL is not configured.");
+            return;
+        }
+
+        let subcommand = match parse_l4d2center_subcommand(args) {
+            Ok(subcommand) => subcommand,
+            Err(err) => {
+                eprintln!("{err}");
+                return;
+            }
+        };
+
+        let index_url = self.l4d2center_index_url.clone();
+
+        match subcommand {
+            L4d2CenterSubcommand::List => {
+                match block_on_installer(
+                    runtime_handle,
+                    installer,
+                    installer.list_l4d2center_catalog(&index_url),
+                ) {
+                    Ok(catalog) => print_l4d2center_catalog(&catalog),
+                    Err(err) => eprintln!("Failed to list L4D2Center catalog: {err}"),
+                }
+            }
+            L4d2CenterSubcommand::Install { name } => {
+                match block_on_installer(
+                    runtime_handle,
+                    installer,
+                    installer.install_l4d2center_by_name(&index_url, &name),
+                ) {
+                    Ok(map_entry) => {
+                        println!(
+                            "Installed L4D2Center map #{}: {} ({})",
+                            map_entry.id, map_entry.name, map_entry.installed_path
+                        );
+                    }
+                    Err(err) => eprintln!("L4D2Center install failed: {err}"),
+                }
+            }
+            L4d2CenterSubcommand::Update(update_args) => {
+                match block_on_installer(
+                    runtime_handle,
+                    installer,
+                    installer.update_l4d2center_maps(
+                        &index_url,
+                        update_args.map_id,
+                        update_args.name.as_deref(),
+                        update_args.force,
+                        update_args.check_only,
+                    ),
+                ) {
+                    Ok(report) => {
+                        if update_args.check_only {
+                            print_l4d2center_check_report(&report);
+                        } else {
+                            print_l4d2center_update_report(&report);
+                        }
+                    }
+                    Err(err) => eprintln!("L4D2Center update failed: {err}"),
+                }
+            }
         }
     }
 }

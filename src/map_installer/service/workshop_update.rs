@@ -273,6 +273,45 @@ impl MapInstallationService {
                     },
                 ))
             }
+            "7z" => {
+                if !self.sevenz_extractor.sevenz_contains_vpk(&downloaded).await? {
+                    let _ = tokio::fs::remove_file(&downloaded).await;
+                    return Err(anyhow::anyhow!("7z file does not contain any .vpk files"));
+                }
+
+                let extract_temp = self.temp_dir.join(format!(
+                    "update-extract-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                tokio::fs::create_dir_all(&extract_temp).await?;
+
+                if let Err(error) = self
+                    .sevenz_extractor
+                    .extract_sevenz(downloaded.clone(), extract_temp.clone())
+                    .await
+                {
+                    let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+                    let _ = tokio::fs::remove_file(&downloaded).await;
+                    return Err(error);
+                }
+
+                let vpk_files = self.find_vpk_files_in_extracted(extract_temp.clone()).await?;
+                if vpk_files.is_empty() {
+                    let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+                    let _ = tokio::fs::remove_file(&downloaded).await;
+                    return Err(anyhow::anyhow!("No .vpk files found in extracted 7z"));
+                }
+
+                Ok((
+                    vpk_files[0].clone(),
+                    DownloadTempCleanup {
+                        paths: vec![downloaded, extract_temp],
+                    },
+                ))
+            }
             _ => {
                 if self.is_vpk_file(&downloaded).await? {
                     Ok((downloaded, DownloadTempCleanup::empty()))

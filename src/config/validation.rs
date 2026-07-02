@@ -25,6 +25,9 @@ impl Config {
             );
         }
 
+        crate::utils::validate_url(&self.l4d2center_index_url)
+            .map_err(|e| anyhow::anyhow!("Invalid l4d2center_index_url: {e}"))?;
+
         if !self.local_api_bind.ip().is_loopback() {
             tracing::warn!(
                 addr = %self.local_api_bind,

@@ -15,6 +15,9 @@ pub trait Extractor: Send + Sync {
     /// Extract a ZIP archive to the destination directory
     async fn extract_zip(&self, archive_path: PathBuf, dest: PathBuf) -> anyhow::Result<()>;
     
+    /// Extract a 7z archive to the destination directory
+    async fn extract_sevenz(&self, archive_path: PathBuf, dest: PathBuf) -> anyhow::Result<()>;
+    
     /// Extract a VPK archive to the destination directory
     /// Note: VPK files don't need extraction, use extract_vpk_metadata to get metadata
     async fn extract_vpk(&self, archive_path: PathBuf, dest: PathBuf) -> anyhow::Result<()>;

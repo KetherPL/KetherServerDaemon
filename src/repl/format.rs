@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use crate::map_installer::{CompactReport, DiscoveryReport, WorkshopUpdateReport};
+use crate::catalog::{CatalogMapStatus, L4d2CenterCatalogEntry};
+use crate::map_installer::{CompactReport, DiscoveryReport, L4d2CenterUpdateReport, WorkshopUpdateReport};
 use crate::registry::{MapEntry, SourceKind};
 
 pub fn source_kind_label(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Workshop => "workshop",
         SourceKind::SirPlease => "sirplease",
+        SourceKind::L4d2Center => "l4d2center",
         SourceKind::Other => "other",
     }
 }
@@ -141,6 +143,80 @@ pub fn print_workshop_update_report(report: &WorkshopUpdateReport) {
         report.skipped,
         report.failed.len(),
         report.not_workshop
+    );
+
+    for map in &report.updated {
+        println!(
+            "  Updated #{}: {} ({})",
+            map.id, map.name, map.installed_path
+        );
+    }
+
+    for failure in &report.failed {
+        eprintln!("  Failed #{}: {}", failure.map_id, failure.error);
+    }
+}
+
+fn catalog_status_label(status: &CatalogMapStatus) -> &'static str {
+    match status {
+        CatalogMapStatus::NotInstalled => "not_installed",
+        CatalogMapStatus::UpToDate => "up_to_date",
+        CatalogMapStatus::Outdated => "outdated",
+    }
+}
+
+pub fn print_l4d2center_catalog(catalog: &[L4d2CenterCatalogEntry]) {
+    if catalog.is_empty() {
+        println!("L4D2Center catalog is empty.");
+        return;
+    }
+
+    println!("L4D2Center catalog ({} map(s)):", catalog.len());
+    for entry in catalog {
+        let map_id = entry
+            .map_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "  {} | status={} | map_id={} | md5={} | size={}",
+            entry.name,
+            catalog_status_label(&entry.status),
+            map_id,
+            entry.md5,
+            entry.size
+        );
+    }
+}
+
+pub fn print_l4d2center_check_report(report: &L4d2CenterUpdateReport) {
+    println!(
+        "L4D2Center check: {} update(s) available, {} up to date, {} failed, {} not L4D2Center",
+        report.available.len(),
+        report.skipped,
+        report.failed.len(),
+        report.not_l4d2center
+    );
+
+    for item in &report.available {
+        let local = item.local_md5.as_deref().unwrap_or("-");
+        println!(
+            "  #{} | {} | index:{} | local:{}",
+            item.map_id, item.name, item.index_md5, local
+        );
+    }
+
+    for failure in &report.failed {
+        eprintln!("  Failed #{}: {}", failure.map_id, failure.error);
+    }
+}
+
+pub fn print_l4d2center_update_report(report: &L4d2CenterUpdateReport) {
+    println!(
+        "L4D2Center update complete: {} updated, {} skipped, {} failed, {} not L4D2Center",
+        report.updated.len(),
+        report.skipped,
+        report.failed.len(),
+        report.not_l4d2center
     );
 
     for map in &report.updated {

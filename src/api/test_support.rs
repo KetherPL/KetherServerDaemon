@@ -33,7 +33,11 @@ pub async fn setup_api_fixture() -> (Arc<ApiHandlers>, Arc<dyn Registry>, TestDi
         .unwrap(),
     );
     (
-        Arc::new(ApiHandlers::new(Arc::clone(&registry), installer)),
+        Arc::new(ApiHandlers::new(
+            Arc::clone(&registry),
+            installer,
+            "https://l4d2center.com/maps/servers/index.json".to_string(),
+        )),
         registry,
         dirs,
     )

@@ -9,9 +9,11 @@ use crate::api::error::ApiError;
 use crate::api::handlers::ApiHandlers;
 use crate::api::response::ApiResponse;
 use crate::api::types::{
-    DiscoverRequest, InstallMapRequest, ModifyMapRequest, UpdateWorkshopRequest,
+    DiscoverRequest, InstallL4d2CenterRequest, InstallMapRequest, ModifyMapRequest,
+    UpdateL4d2CenterRequest, UpdateWorkshopRequest,
 };
-use crate::map_installer::{CompactReport, DiscoveryReport, WorkshopUpdateReport};
+use crate::catalog::L4d2CenterCatalogEntry;
+use crate::map_installer::{CompactReport, DiscoveryReport, L4d2CenterUpdateReport, WorkshopUpdateReport};
 use crate::registry::MapEntry;
 
 pub async fn health_handler() -> Json<ApiResponse<&'static str>> {
@@ -65,6 +67,26 @@ pub async fn compact_handler(
     handlers.compact_registry().await
 }
 
+pub async fn update_l4d2center_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+    Json(request): Json<UpdateL4d2CenterRequest>,
+) -> Result<Json<ApiResponse<L4d2CenterUpdateReport>>, ApiError> {
+    handlers.update_l4d2center_maps(Json(request)).await
+}
+
+pub async fn list_l4d2center_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+) -> Result<Json<ApiResponse<Vec<L4d2CenterCatalogEntry>>>, ApiError> {
+    handlers.list_l4d2center_catalog().await
+}
+
+pub async fn install_l4d2center_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+    Json(request): Json<InstallL4d2CenterRequest>,
+) -> Result<Json<ApiResponse<MapEntry>>, ApiError> {
+    handlers.install_l4d2center_map(Json(request)).await
+}
+
 pub async fn modify_map_handler(
     axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
     Path(id): Path<String>,
@@ -81,6 +103,9 @@ pub fn routes(handlers: Arc<ApiHandlers>) -> Router {
         .route("/api/maps/install", post(install_map_handler))
         .route("/api/maps/uninstall/{id}", post(uninstall_map_handler))
         .route("/api/maps/workshop/update", post(update_workshop_handler))
+        .route("/api/maps/l4d2center", get(list_l4d2center_handler))
+        .route("/api/maps/l4d2center/install", post(install_l4d2center_handler))
+        .route("/api/maps/l4d2center/update", post(update_l4d2center_handler))
         .route("/api/maps/discover", post(discover_handler))
         .route("/api/maps/compact", post(compact_handler))
         .route("/api/maps", get(list_maps_handler))

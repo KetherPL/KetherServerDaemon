@@ -126,6 +126,7 @@ async fn setup_test_service() -> (MapInstallationService, Arc<dyn Registry>, tes
                 None,
                 Some("Test Map".to_string()),
                 Some("https://example.com/test_map.zip".to_string()),
+                None,
             )
             .await
             .expect("ZIP install should succeed");

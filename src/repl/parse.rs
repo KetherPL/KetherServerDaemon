@@ -67,3 +67,81 @@ pub fn parse_update_args(args: &[&str]) -> Result<UpdateArgs, String> {
         check_only,
     })
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum L4d2CenterSubcommand {
+    List,
+    Install { name: String },
+    Update(L4d2CenterUpdateArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct L4d2CenterUpdateArgs {
+    pub map_id: Option<u64>,
+    pub name: Option<String>,
+    pub force: bool,
+    pub check_only: bool,
+}
+
+pub fn parse_l4d2center_subcommand(args: &[&str]) -> Result<L4d2CenterSubcommand, String> {
+    let Some(subcommand) = args.first().copied() else {
+        return Err(
+            "Usage: l4d2center list | l4d2center install <name> | l4d2center update [id|name] [--check] [--force]"
+                .to_string(),
+        );
+    };
+
+    match subcommand {
+        "list" => Ok(L4d2CenterSubcommand::List),
+        "install" => {
+            if args.len() < 2 {
+                return Err("Usage: l4d2center install <name>".to_string());
+            }
+            Ok(L4d2CenterSubcommand::Install {
+                name: args[1..].join(" "),
+            })
+        }
+        "update" => Ok(L4d2CenterSubcommand::Update(parse_l4d2center_update_args(
+            &args[1..],
+        )?)),
+        other => Err(format!(
+            "Unknown l4d2center subcommand '{other}'. Usage: l4d2center list | install <name> | update [id|name] [--check] [--force]"
+        )),
+    }
+}
+
+pub fn parse_l4d2center_update_args(args: &[&str]) -> Result<L4d2CenterUpdateArgs, String> {
+    let mut force = false;
+    let mut check_only = false;
+    let mut map_id = None;
+    let mut name = None;
+
+    for arg in args {
+        if *arg == "--force" {
+            force = true;
+        } else if *arg == "--check" {
+            check_only = true;
+        } else if let Ok(id) = arg.parse::<u64>() {
+            if map_id.is_some() || name.is_some() {
+                return Err(
+                    "Usage: l4d2center update [id|name] [--check] [--force]".to_string(),
+                );
+            }
+            map_id = Some(id);
+        } else {
+            if map_id.is_some() || name.is_some() {
+                return Err(
+                    "Usage: l4d2center update [id|name] [--check] [--force]".to_string(),
+                );
+            }
+            name = Some(arg.to_string());
+        }
+    }
+
+    Ok(L4d2CenterUpdateArgs {
+        map_id,
+        name,
+        force,
+        check_only,
+    })
+}

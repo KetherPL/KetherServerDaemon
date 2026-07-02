@@ -35,3 +35,18 @@ pub struct ModifyMapRequest {
     pub field: String,
     pub value: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InstallL4d2CenterRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateL4d2CenterRequest {
+    pub map_id: Option<u64>,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub check_only: bool,
+}

@@ -5,14 +5,14 @@ use anyhow::Context;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::map_installer::helpers::{self, workshop_source_url};
+use crate::map_installer::helpers::{source_kind_from_url, workshop_source_url};
 use crate::downloader::{
     steam::steam_time_to_utc,
     workshop::WorkshopDownloader,
     zip::ZipDownloader,
     traits::Downloader,
 };
-use crate::extractor::{zip::ZipExtractor, traits::Extractor, vpk::VpkExtractor};
+use crate::extractor::{sevenz::SevenZExtractor, zip::ZipExtractor, traits::Extractor, vpk::VpkExtractor};
 use crate::registry::{models::{MapEntry, SourceKind}, traits::Registry};
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +21,7 @@ pub struct MapInstallationService {
     workshop_downloader: WorkshopDownloader,
     zip_downloader: ZipDownloader,
     zip_extractor: ZipExtractor,
+    sevenz_extractor: SevenZExtractor,
     vpk_extractor: VpkExtractor,
     addons_dir: PathBuf,
     temp_dir: PathBuf,
@@ -61,6 +62,23 @@ pub struct WorkshopUpdateReport {
     pub skipped: usize,
     pub failed: Vec<MapOperationFailure>,
     pub not_workshop: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct L4d2CenterUpdateAvailable {
+    pub name: String,
+    pub map_id: u64,
+    pub index_md5: String,
+    pub local_md5: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct L4d2CenterUpdateReport {
+    pub updated: Vec<MapEntry>,
+    pub available: Vec<L4d2CenterUpdateAvailable>,
+    pub skipped: usize,
+    pub failed: Vec<MapOperationFailure>,
+    pub not_l4d2center: usize,
 }
 
 /// Returns true when a workshop map should be re-downloaded from Steam.
@@ -105,6 +123,7 @@ impl MapInstallationService {
             workshop_downloader: WorkshopDownloader::new(temp_dir.clone(), max_download_size_bytes)?,
             zip_downloader: ZipDownloader::new(temp_dir.clone(), max_download_size_bytes).await?,
             zip_extractor: ZipExtractor::new(max_extraction_size_bytes, max_extraction_file_count),
+            sevenz_extractor: SevenZExtractor::new(max_extraction_size_bytes, max_extraction_file_count),
             vpk_extractor: VpkExtractor::new(),
             addons_dir,
             temp_dir,
@@ -166,6 +185,7 @@ impl MapInstallationService {
                 Some(workshop_id),
                 name,
                 None,
+                None,
             )
             .await?;
 
@@ -182,20 +202,21 @@ impl MapInstallationService {
         url: &str,
         name: Option<String>,
     ) -> anyhow::Result<MapEntry> {
-        info!(url = %url, "Installing map from ZIP URL");
-        
-        // Detect source kind based on URL
-        let source_kind = if url.to_lowercase().contains("sirplease.vercel.app") {
-            SourceKind::SirPlease
-        } else {
-            SourceKind::Other
-        };
-        
-        // Download ZIP file
+        info!(url = %url, "Installing map from URL");
+
+        let source_kind = source_kind_from_url(url);
+
         let downloaded_path = self.zip_downloader.download_zip(url).await?;
-        
-        // Install the downloaded file
-        self.install_downloaded_file(downloaded_path, source_kind, None, name, Some(url.to_string())).await
+
+        self.install_downloaded_file(
+            downloaded_path,
+            source_kind,
+            None,
+            name,
+            Some(url.to_string()),
+            None,
+        )
+        .await
     }
     
     /// Install a downloaded file (ZIP or VPK)
@@ -206,21 +227,61 @@ impl MapInstallationService {
         workshop_id: Option<u64>,
         provided_name: Option<String>,
         source_url: Option<String>,
+        expected_installed_filename: Option<String>,
     ) -> anyhow::Result<MapEntry> {
-        let file_ext = file_path.extension()
+        let file_ext = file_path
+            .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        
+
         match file_ext.as_str() {
-            "vpk" => self.install_vpk_file(file_path, source_kind, workshop_id, provided_name, source_url).await,
-            "zip" => self.install_zip_file(file_path, source_kind, workshop_id, provided_name, source_url).await,
+            "vpk" => {
+                self.install_vpk_file(
+                    file_path,
+                    source_kind,
+                    workshop_id,
+                    provided_name,
+                    source_url,
+                    expected_installed_filename,
+                )
+                .await
+            }
+            "zip" => {
+                self.install_zip_file(
+                    file_path,
+                    source_kind,
+                    workshop_id,
+                    provided_name,
+                    source_url,
+                    expected_installed_filename,
+                )
+                .await
+            }
+            "7z" => {
+                self.install_sevenz_file(
+                    file_path,
+                    source_kind,
+                    workshop_id,
+                    provided_name,
+                    source_url,
+                    expected_installed_filename,
+                )
+                .await
+            }
             _ => {
-                // Try to infer from content
                 if file_path.extension().is_none() || file_ext.is_empty() {
-                    // Check if it's a VPK by trying to read it
                     if self.is_vpk_file(&file_path).await? {
-                        return self.install_vpk_file(file_path, source_kind, workshop_id, provided_name, source_url).await;
+                        return self
+                            .install_vpk_file(
+                                file_path,
+                                source_kind,
+                                workshop_id,
+                                provided_name,
+                                source_url,
+                                expected_installed_filename,
+                            )
+                            .await;
                     }
                 }
                 Err(anyhow::anyhow!("Unsupported file type: {}", file_ext))
@@ -245,6 +306,7 @@ impl MapInstallationService {
         workshop_id: Option<u64>,
         provided_name: Option<String>,
         source_url: Option<String>,
+        expected_installed_filename: Option<String>,
     ) -> anyhow::Result<MapEntry> {
         info!(path = %vpk_path.display(), "Installing VPK file");
         
@@ -256,18 +318,10 @@ impl MapInstallationService {
         let map_name = crate::utils::sanitize_map_name(&raw_map_name)
             .context("Invalid map name provided")?;
         
-        // Sanitize VPK filename to prevent path traversal
-        let raw_vpk_filename = vpk_path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown.vpk");
-        let vpk_filename = crate::utils::sanitize_filename(raw_vpk_filename);
-        
-        // Ensure filename ends with .vpk
-        let vpk_filename = if vpk_filename.ends_with(".vpk") {
-            vpk_filename
-        } else {
-            format!("{}.vpk", vpk_filename)
-        };
+        let vpk_filename = Self::resolve_vpk_filename(
+            expected_installed_filename.as_deref(),
+            &vpk_path,
+        );
         
         // Place VPK file directly in addons/ directory
         let install_path = self.addons_dir.join(&vpk_filename);
@@ -278,7 +332,7 @@ impl MapInstallationService {
 
         let resolved_workshop_id = match source_kind {
             SourceKind::Workshop => workshop_id,
-            SourceKind::SirPlease | SourceKind::Other => None,
+            SourceKind::SirPlease | SourceKind::L4d2Center | SourceKind::Other => None,
         };
 
         if let Some(wid) = resolved_workshop_id
@@ -363,61 +417,137 @@ impl MapInstallationService {
         workshop_id: Option<u64>,
         provided_name: Option<String>,
         source_url: Option<String>,
+        expected_installed_filename: Option<String>,
     ) -> anyhow::Result<MapEntry> {
         info!(path = %zip_path.display(), "Installing ZIP file");
-        
-        // Validate ZIP contains at least one VPK file before extraction
+
         if !self.zip_contains_vpk(&zip_path).await? {
             return Err(anyhow::anyhow!("ZIP file does not contain any .vpk files"));
         }
-        
-        // Extract ZIP to temporary directory
-        let extract_temp = self.temp_dir.join(format!("extract-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+
+        let extract_temp = self.temp_dir.join(format!(
+            "extract-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         tokio::fs::create_dir_all(&extract_temp).await?;
-        
-        // Extract ZIP with cleanup on error
-        if let Err(e) = self.zip_extractor.extract_zip(zip_path.clone(), extract_temp.clone()).await {
-            // Clean up temp directory on extraction error
+
+        if let Err(error) = self
+            .zip_extractor
+            .extract_zip(zip_path.clone(), extract_temp.clone())
+            .await
+        {
             let _ = tokio::fs::remove_dir_all(&extract_temp).await;
-            return Err(e);
+            return Err(error);
         }
-        
-        // Find VPK file(s) in extracted contents
+
+        let fallback_source_url = source_url.clone().unwrap_or_else(|| {
+            zip_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| format!("zip:{n}"))
+                .unwrap_or_else(|| "zip:unknown".to_string())
+        });
+
+        self.install_vpk_from_extracted_dir(
+            extract_temp,
+            zip_path,
+            source_kind,
+            workshop_id,
+            provided_name,
+            Some(fallback_source_url),
+            expected_installed_filename,
+        )
+        .await
+    }
+
+    /// Install a 7z file
+    async fn install_sevenz_file(
+        &self,
+        archive_path: PathBuf,
+        source_kind: SourceKind,
+        workshop_id: Option<u64>,
+        provided_name: Option<String>,
+        source_url: Option<String>,
+        expected_installed_filename: Option<String>,
+    ) -> anyhow::Result<MapEntry> {
+        info!(path = %archive_path.display(), "Installing 7z file");
+
+        if !self.sevenz_extractor.sevenz_contains_vpk(&archive_path).await? {
+            return Err(anyhow::anyhow!("7z file does not contain any .vpk files"));
+        }
+
+        let extract_temp = self.temp_dir.join(format!(
+            "extract-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&extract_temp).await?;
+
+        if let Err(error) = self
+            .sevenz_extractor
+            .extract_sevenz(archive_path.clone(), extract_temp.clone())
+            .await
+        {
+            let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+            return Err(error);
+        }
+
+        let fallback_source_url = source_url.clone().unwrap_or_else(|| {
+            archive_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| format!("7z:{n}"))
+                .unwrap_or_else(|| "7z:unknown".to_string())
+        });
+
+        self.install_vpk_from_extracted_dir(
+            extract_temp,
+            archive_path,
+            source_kind,
+            workshop_id,
+            provided_name,
+            Some(fallback_source_url),
+            expected_installed_filename,
+        )
+        .await
+    }
+
+    async fn install_vpk_from_extracted_dir(
+        &self,
+        extract_temp: PathBuf,
+        archive_path: PathBuf,
+        source_kind: SourceKind,
+        workshop_id: Option<u64>,
+        provided_name: Option<String>,
+        source_url: Option<String>,
+        expected_installed_filename: Option<String>,
+    ) -> anyhow::Result<MapEntry> {
         let vpk_files = self.find_vpk_files_in_extracted(extract_temp.clone()).await?;
         if vpk_files.is_empty() {
             let _ = tokio::fs::remove_dir_all(&extract_temp).await;
-            return Err(anyhow::anyhow!("No .vpk files found in extracted ZIP"));
+            let _ = tokio::fs::remove_file(&archive_path).await;
+            return Err(anyhow::anyhow!("No .vpk files found in extracted archive"));
         }
-        
-        // Use the first VPK file (if multiple, we'll install just the first one for now)
+
         let source_vpk_path = vpk_files[0].clone();
-        
-        // Extract metadata from VPK to get name and version
-        let metadata = self.vpk_extractor.extract_vpk_metadata(source_vpk_path.clone()).await?;
-        
-        // Determine map name
-        let raw_map_name = if let Some(name) = provided_name {
-            name
-        } else {
-            metadata.title.clone()
-        };
+        let metadata = self
+            .vpk_extractor
+            .extract_vpk_metadata(source_vpk_path.clone())
+            .await?;
+
+        let raw_map_name = provided_name.unwrap_or_else(|| metadata.title.clone());
         let map_name = crate::utils::sanitize_map_name(&raw_map_name)
             .context("Invalid map name detected")?;
-        
-        // Get VPK filename
-        let raw_vpk_filename = source_vpk_path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown.vpk");
-        let vpk_filename = crate::utils::sanitize_filename(raw_vpk_filename);
-        
-        // Ensure filename ends with .vpk
-        let vpk_filename = if vpk_filename.ends_with(".vpk") {
-            vpk_filename
-        } else {
-            format!("{}.vpk", vpk_filename)
-        };
-        
-        // Place VPK file directly in addons/ directory
+
+        let vpk_filename = Self::resolve_vpk_filename(
+            expected_installed_filename.as_deref(),
+            &source_vpk_path,
+        );
         let install_path = self.addons_dir.join(&vpk_filename);
 
         tokio::fs::create_dir_all(&self.addons_dir).await?;
@@ -426,59 +556,55 @@ impl MapInstallationService {
 
         let resolved_workshop_id = match source_kind {
             SourceKind::Workshop => workshop_id,
-            SourceKind::SirPlease | SourceKind::Other => None,
+            SourceKind::SirPlease | SourceKind::L4d2Center | SourceKind::Other => None,
         };
 
         if let Some(wid) = resolved_workshop_id
-            && let Some(existing) = self.find_map_by_workshop_id(wid).await? {
-                let _ = tokio::fs::remove_dir_all(&extract_temp).await;
-                if let Err(e) = tokio::fs::remove_file(&zip_path).await {
-                    warn!(error = %e, path = %zip_path.display(), "Failed to clean up downloaded ZIP");
-                }
-                return Ok(existing);
-            }
+            && let Some(existing) = self.find_map_by_workshop_id(wid).await?
+        {
+            let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+            let _ = tokio::fs::remove_file(&archive_path).await;
+            return Ok(existing);
+        }
 
         if self.find_map_by_name(&map_name).await?.is_some() {
             return Err(anyhow::anyhow!(
-                "Map with name '{}' already installed",
-                map_name
+                "Map with name '{map_name}' already installed"
             ));
         }
 
         if let Some(existing) = self.find_map_by_installed_path(&vpk_filename).await? {
             let _ = tokio::fs::remove_dir_all(&extract_temp).await;
-            if let Err(e) = tokio::fs::remove_file(&zip_path).await {
-                warn!(error = %e, path = %zip_path.display(), "Failed to clean up downloaded ZIP");
-            }
+            let _ = tokio::fs::remove_file(&archive_path).await;
             return Ok(existing);
         }
 
-        // Copy VPK file to addons directory
-        tokio::fs::copy(&source_vpk_path, &install_path).await
+        tokio::fs::copy(&source_vpk_path, &install_path)
+            .await
             .context("Failed to copy VPK file to addons directory")?;
+        info!(
+            source = %source_vpk_path.display(),
+            dest = %install_path.display(),
+            "Copied VPK file from archive"
+        );
 
-        info!(source = %source_vpk_path.display(), dest = %install_path.display(), "Copied VPK file from ZIP");
-
-        // Calculate MD5 checksum
         let checksum = crate::utils::calculate_file_md5(&install_path).await.ok();
         let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
-
-        // Determine source URL
         let source_url = source_url.unwrap_or_else(|| {
-            zip_path.file_name()
+            archive_path
+                .file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| format!("zip:{}", n))
-                .unwrap_or_else(|| "zip:unknown".to_string())
+                .map(|n| format!("archive:{n}"))
+                .unwrap_or_else(|| "archive:unknown".to_string())
         });
 
-        // Create map entry with relative path (ID will be assigned by database)
         let mut map_entry = MapEntry {
-            id: 0, // Temporary, will be replaced by database-assigned ID
+            id: 0,
             name: map_name,
             source_url,
             source_kind,
             workshop_id: resolved_workshop_id,
-            installed_path: vpk_filename.clone(), // Store relative path (just filename)
+            installed_path: vpk_filename.clone(),
             installed_at: chrono::Utc::now(),
             workshop_updated_at: None,
             version: Some(metadata.version),
@@ -486,28 +612,39 @@ impl MapInstallationService {
             checksum_kind,
         };
 
-        // Register in database and get assigned ID
         let assigned_id = match self.registry.add_map(map_entry.clone()).await {
             Ok(id) => id,
-            Err(e) => {
-                // Clean up installed file on error
+            Err(error) => {
                 let _ = tokio::fs::remove_file(&install_path).await;
-                return Err(e);
+                return Err(error);
             }
         };
 
         drop(_guard);
-
-        // Update map entry with assigned ID
         map_entry.id = assigned_id;
-        
-        // Clean up downloaded ZIP file and temp directory
-        if let Err(e) = tokio::fs::remove_file(&zip_path).await {
-            warn!(error = %e, path = %zip_path.display(), "Failed to clean up downloaded ZIP");
-        }
+
+        let _ = tokio::fs::remove_file(&archive_path).await;
         let _ = tokio::fs::remove_dir_all(&extract_temp).await;
-        
+
         Ok(map_entry)
+    }
+
+    fn resolve_vpk_filename(expected: Option<&str>, source_vpk_path: &Path) -> String {
+        let raw_vpk_filename = expected
+            .map(str::to_string)
+            .or_else(|| {
+                source_vpk_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "unknown.vpk".to_string());
+        let vpk_filename = crate::utils::sanitize_filename(&raw_vpk_filename);
+        if vpk_filename.ends_with(".vpk") {
+            vpk_filename
+        } else {
+            format!("{vpk_filename}.vpk")
+        }
     }
     
     /// Check if ZIP file contains at least one .vpk file
@@ -818,6 +955,7 @@ impl MapInstallationService {
 
 
 mod discovery;
+mod l4d2center;
 mod workshop_update;
 
 #[cfg(test)]

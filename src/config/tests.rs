@@ -27,6 +27,10 @@ fn test_default_config() {
     );
     assert_eq!(config.sync_interval_secs, 300);
     assert_eq!(config.log_level, "info");
+    assert_eq!(
+        config.l4d2center_index_url,
+        "https://l4d2center.com/maps/servers/index.json"
+    );
 }
 
 #[test]

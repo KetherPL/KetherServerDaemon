@@ -17,6 +17,7 @@ pub mod keys {
     pub const MAX_DOWNLOAD_SIZE_BYTES: &str = "KETHER_MAX_DOWNLOAD_SIZE_BYTES";
     pub const MAX_EXTRACTION_SIZE_BYTES: &str = "KETHER_MAX_EXTRACTION_SIZE_BYTES";
     pub const MAX_EXTRACTION_FILE_COUNT: &str = "KETHER_MAX_EXTRACTION_FILE_COUNT";
+    pub const L4D2CENTER_INDEX_URL: &str = "KETHER_L4D2CENTER_INDEX_URL";
 }
 
 /// Apply environment variable overrides on top of file/default configuration.
@@ -50,6 +51,9 @@ pub fn apply_env_overrides(config: &mut Config) -> anyhow::Result<()> {
     }
     if let Ok(val) = std::env::var(keys::MAX_EXTRACTION_FILE_COUNT) {
         config.max_extraction_file_count = val.parse()?;
+    }
+    if let Ok(val) = std::env::var(keys::L4D2CENTER_INDEX_URL) {
+        config.l4d2center_index_url = val;
     }
 
     Ok(())
