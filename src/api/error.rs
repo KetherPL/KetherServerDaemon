@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 
-use crate::api::handlers::ApiResponse;
+use crate::api::response::ApiResponse;
 
 #[derive(Debug)]
 pub struct ApiError {
