@@ -315,20 +315,18 @@ mod tests {
     use super::*;
     use crate::registry::models::SourceKind;
     use crate::registry::traits::Registry;
-    use crate::test_helpers;
+    use crate::test_helpers::{self, TestDirs};
     use axum::extract::Path;
     use std::sync::Arc;
-    use tempfile::TempDir;
 
-    async fn setup_handlers() -> (ApiHandlers, Arc<dyn Registry>, TempDir, TempDir) {
-        let registry: Arc<dyn Registry> = Arc::new(test_helpers::setup_test_database().await.unwrap());
-        let temp_dir = test_helpers::create_temp_dir();
-        let addons_dir = test_helpers::create_temp_dir();
+    async fn setup_handlers() -> (ApiHandlers, Arc<dyn Registry>, TestDirs) {
+        let (registry, dirs) = test_helpers::setup_test_dirs().await.unwrap();
+        let paths = dirs.service_paths();
         let installer = Arc::new(
             MapInstallationService::new(
                 Arc::clone(&registry),
-                addons_dir.path().to_path_buf(),
-                temp_dir.path().to_path_buf(),
+                paths.addons_dir,
+                paths.download_dir,
                 100 * 1024 * 1024,
                 1024 * 1024 * 1024,
                 10000,
@@ -339,8 +337,7 @@ mod tests {
         (
             ApiHandlers::new(Arc::clone(&registry), installer),
             registry,
-            addons_dir,
-            temp_dir,
+            dirs,
         )
     }
 
@@ -362,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_modify_map_success() {
-        let (handlers, registry, _addons_dir, _temp_dir) = setup_handlers().await;
+        let (handlers, registry, _dirs) = setup_handlers().await;
         let id = registry.add_map(sample_map()).await.unwrap();
 
         let response = handlers
@@ -382,7 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_modify_map_not_found() {
-        let (handlers, _registry, _addons_dir, _temp_dir) = setup_handlers().await;
+        let (handlers, _registry, _dirs) = setup_handlers().await;
 
         let result = handlers
             .modify_map(
@@ -399,7 +396,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_modify_map_unknown_field() {
-        let (handlers, registry, _addons_dir, _temp_dir) = setup_handlers().await;
+        let (handlers, registry, _dirs) = setup_handlers().await;
         let id = registry.add_map(sample_map()).await.unwrap();
 
         let result = handlers
@@ -417,7 +414,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_discover_maps_empty_addons() {
-        let (handlers, _registry, _addons_dir, _temp_dir) = setup_handlers().await;
+        let (handlers, _registry, _dirs) = setup_handlers().await;
 
         let response = handlers
             .discover_maps(Json(DiscoverRequest {
@@ -434,7 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compact_registry_empty() {
-        let (handlers, _registry, _addons_dir, _temp_dir) = setup_handlers().await;
+        let (handlers, _registry, _dirs) = setup_handlers().await;
 
         let response = handlers.compact_registry().await.unwrap();
 
@@ -446,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_workshop_maps_empty_registry() {
-        let (handlers, _registry, _addons_dir, _temp_dir) = setup_handlers().await;
+        let (handlers, _registry, _dirs) = setup_handlers().await;
 
         let response = handlers
             .update_workshop_maps(Json(UpdateWorkshopRequest {
@@ -465,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_workshop_maps_map_not_found() {
-        let (handlers, _registry, _addons_dir, _temp_dir) = setup_handlers().await;
+        let (handlers, _registry, _dirs) = setup_handlers().await;
 
         let result = handlers
             .update_workshop_maps(Json(UpdateWorkshopRequest {

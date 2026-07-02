@@ -1444,21 +1444,22 @@ mod tests {
     use zip::CompressionMethod;
     use std::io::Write;
 
-    async fn setup_test_service() -> (MapInstallationService, TempDir, Arc<dyn Registry>) {
-        let registry: Arc<dyn Registry> = Arc::new(test_helpers::setup_test_database().await.unwrap());
-        let temp_dir = test_helpers::create_temp_dir();
-        let addons_dir = test_helpers::create_temp_dir();
-        
+    async fn setup_test_service() -> (MapInstallationService, Arc<dyn Registry>, test_helpers::TestDirs) {
+        let (registry, dirs) = test_helpers::setup_test_dirs().await.unwrap();
+        let paths = dirs.service_paths();
+
         let service = MapInstallationService::new(
             Arc::clone(&registry),
-            addons_dir.path().to_path_buf(),
-            temp_dir.path().to_path_buf(),
+            paths.addons_dir,
+            paths.download_dir,
             100 * 1024 * 1024,
             1024 * 1024 * 1024,
             10000,
-        ).await.unwrap();
-        
-        (service, addons_dir, registry)
+        )
+        .await
+        .unwrap();
+
+        (service, registry, dirs)
     }
 
     fn create_test_zip_with_map(contents: &[(&str, &[u8])]) -> (PathBuf, TempDir) {
@@ -1479,7 +1480,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_accessor() {
-        let (service, _addons_dir, registry) = setup_test_service().await;
+        let (service, registry, _dirs) = setup_test_service().await;
         // Verify we can access the registry
         let service_registry = service.registry();
         assert_eq!(Arc::as_ptr(service_registry), Arc::as_ptr(&registry));
@@ -1487,7 +1488,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_uninstall_map_exists() {
-        let (service, _addons_dir, registry) = setup_test_service().await;
+        let (service, registry, _dirs) = setup_test_service().await;
         
         // Add a test map entry
         let mut map_entry = MapEntry {
@@ -1517,7 +1518,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_uninstall_map_not_exists() {
-        let (service, _addons_dir, _registry) = setup_test_service().await;
+        let (service, _registry, _dirs) = setup_test_service().await;
         
         // Uninstall non-existent map should not error
         let result = service.uninstall_map(99999).await;
@@ -1526,7 +1527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_from_url_rejects_invalid_url() {
-        let (service, _addons_dir, _registry) = setup_test_service().await;
+        let (service, _registry, _dirs) = setup_test_service().await;
         
         // This should fail because numeric strings are not valid URLs
         let result = service.install_from_url("123456789".to_string(), None).await;
@@ -1543,7 +1544,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_from_url_dispatch_zip() {
-        let (service, _addons_dir, registry) = setup_test_service().await;
+        let (service, registry, _dirs) = setup_test_service().await;
 
         let minimal_vpk = b"VPK\x02\x00\x00\x00";
         let (test_zip_path, _zip_temp) = create_test_zip_with_map(&[("test_map.vpk", minimal_vpk)]);
@@ -1572,10 +1573,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_compact_registry_prunes_sorts_and_reindexes() {
-        let (service, addons_dir, registry) = setup_test_service().await;
+        let (service, registry, dirs) = setup_test_service().await;
 
-        tokio::fs::write(addons_dir.path().join("alpha.vpk"), b"vpk").await.unwrap();
-        tokio::fs::write(addons_dir.path().join("zulu.vpk"), b"vpk").await.unwrap();
+        tokio::fs::write(dirs.addons_path().join("alpha.vpk"), b"vpk").await.unwrap();
+        tokio::fs::write(dirs.addons_path().join("zulu.vpk"), b"vpk").await.unwrap();
 
         let now = chrono::Utc::now();
         registry
@@ -1659,7 +1660,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_modify_map_field_workshop_id_sets_kind_and_url() {
-        let (service, _addons_dir, registry) = setup_test_service().await;
+        let (service, registry, _dirs) = setup_test_service().await;
         let id = registry.add_map(create_modify_test_entry()).await.unwrap();
 
         let updated = service
@@ -1685,7 +1686,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_modify_map_field_source_kind_other_clears_workshop_id() {
-        let (service, _addons_dir, registry) = setup_test_service().await;
+        let (service, registry, _dirs) = setup_test_service().await;
         let id = registry.add_map(create_modify_test_entry()).await.unwrap();
 
         let updated = service
@@ -1703,7 +1704,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_modify_map_field_unknown_field_errors() {
-        let (service, _addons_dir, registry) = setup_test_service().await;
+        let (service, registry, _dirs) = setup_test_service().await;
         let id = registry.add_map(create_modify_test_entry()).await.unwrap();
 
         let result = service
@@ -1716,7 +1717,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_modify_map_field_missing_id_errors() {
-        let (service, _addons_dir, _registry) = setup_test_service().await;
+        let (service, _registry, _dirs) = setup_test_service().await;
 
         let result = service
             .modify_map_field(99999, "name", "New Name")
@@ -1810,8 +1811,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_detect_map_from_path_is_idempotent_for_installed_path() {
-        let (service, addons_dir, registry) = setup_test_service().await;
-        tokio::fs::write(addons_dir.path().join("alpha.vpk"), b"vpk")
+        let (service, registry, dirs) = setup_test_service().await;
+        tokio::fs::write(dirs.addons_path().join("alpha.vpk"), b"vpk")
             .await
             .unwrap();
 
@@ -1832,7 +1833,7 @@ mod tests {
             .await
             .unwrap();
 
-        let path = addons_dir.path().join("alpha.vpk");
+        let path = dirs.addons_path().join("alpha.vpk");
         let result = service.detect_map_from_path(path).await.unwrap().unwrap();
         assert_eq!(result.id, id);
         assert_eq!(registry.list_maps().await.unwrap().len(), 1);
@@ -1840,8 +1841,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_map_from_path_returns_existing_when_metadata_unavailable() {
-        let (service, addons_dir, registry) = setup_test_service().await;
-        tokio::fs::write(addons_dir.path().join("alpha.vpk"), b"vpk")
+        let (service, registry, dirs) = setup_test_service().await;
+        tokio::fs::write(dirs.addons_path().join("alpha.vpk"), b"vpk")
             .await
             .unwrap();
 
@@ -1863,7 +1864,7 @@ mod tests {
             .unwrap();
 
         let result = service
-            .sync_map_from_path(addons_dir.path().join("alpha.vpk"))
+            .sync_map_from_path(dirs.addons_path().join("alpha.vpk"))
             .await
             .unwrap()
             .unwrap();
@@ -1873,7 +1874,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_map_by_path_prunes_when_file_gone() {
-        let (service, addons_dir, registry) = setup_test_service().await;
+        let (service, registry, dirs) = setup_test_service().await;
         let id = registry
             .add_map(MapEntry {
                 id: 0,
@@ -1892,7 +1893,7 @@ mod tests {
             .unwrap();
 
         let removed = service
-            .remove_map_by_path(addons_dir.path().join("gone.vpk"))
+            .remove_map_by_path(dirs.addons_path().join("gone.vpk"))
             .await
             .unwrap();
         assert_eq!(removed, Some(id));
@@ -1901,8 +1902,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_map_by_path_noop_when_file_exists() {
-        let (service, addons_dir, registry) = setup_test_service().await;
-        tokio::fs::write(addons_dir.path().join("exists.vpk"), b"vpk")
+        let (service, registry, dirs) = setup_test_service().await;
+        tokio::fs::write(dirs.addons_path().join("exists.vpk"), b"vpk")
             .await
             .unwrap();
 
@@ -1924,7 +1925,7 @@ mod tests {
             .unwrap();
 
         let removed = service
-            .remove_map_by_path(addons_dir.path().join("exists.vpk"))
+            .remove_map_by_path(dirs.addons_path().join("exists.vpk"))
             .await
             .unwrap();
         assert_eq!(removed, None);
@@ -1933,7 +1934,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_workshop_id_returns_existing_without_redownload() {
-        let (service, _addons_dir, registry) = setup_test_service().await;
+        let (service, registry, _dirs) = setup_test_service().await;
         let workshop_id = 3135451698u64;
         let existing_id = registry
             .add_map(MapEntry {
@@ -1962,7 +1963,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_map_by_name_returns_existing_entry() {
-        let (service, _addons_dir, registry) = setup_test_service().await;
+        let (service, registry, _dirs) = setup_test_service().await;
         let id = registry
             .add_map(MapEntry {
                 id: 0,
@@ -2015,12 +2016,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_workshop_update_file_copy_overwrites_target() {
-        let (service, addons_dir, _) = setup_test_service().await;
-        let downloaded = addons_dir.path().join("workshop.vpk");
+        let (service, _registry, dirs) = setup_test_service().await;
+        let downloaded = dirs.addons_path().join("workshop.vpk");
         let payload = b"downloaded-workshop-bytes";
         tokio::fs::write(&downloaded, payload).await.unwrap();
 
-        let target = addons_dir.path().join("installed.vpk");
+        let target = dirs.addons_path().join("installed.vpk");
         tokio::fs::write(&target, b"old-bytes").await.unwrap();
 
         let (source_vpk, cleanup) = service
