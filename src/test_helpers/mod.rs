@@ -47,7 +47,7 @@ pub fn create_test_config() -> (Config, TempDir) {
     let config = Config {
         l4d2_server_dir: base.clone(),
         registry_path: base.join("registry.json"),
-        backend_api_url: "http://localhost:3000/api".to_string(),
+        backend_api_url: Config::default().backend_api_url,
         backend_api_key: None,
         local_api_bind: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         sync_interval_secs: 60,

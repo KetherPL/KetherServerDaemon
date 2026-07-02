@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
-pub mod config;
+mod env;
+mod load;
+mod model;
+mod validation;
 
-pub use config::Config;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod tests;
 
+pub use model::Config;
