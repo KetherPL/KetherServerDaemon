@@ -28,7 +28,7 @@ use registry::{JsonRegistry, Registry};
 use sync::{BackendSyncService, SyncService};
 use watcher::{InotifyWatcher, PendingEntry, Watcher, schedule_pending, should_force_sync};
 use api::HttpServer;
-use map_installer::MapInstallationService;
+use map_installer::{is_watched_map_path, MapInstallationService};
 use repl::{DaemonCommand, start_key_listener};
 
 #[tokio::main]
@@ -80,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
     
     // Spawn tasks
     let installer_watcher = Arc::clone(&installer);
+    let addons_dir_watcher = addons_dir.clone();
     let watcher_task = tokio::spawn(async move {
         info!("Watcher task started");
         let mut receiver = watcher_events;
@@ -98,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
 
                     match event {
                         watcher::WatcherEvent::Create(path) => {
-                            if path.extension().and_then(|e| e.to_str()) == Some("vpk") {
+                            if is_watched_map_path(&addons_dir_watcher, &path) {
                                 let is_new = !pending.contains_key(&path);
                                 schedule_pending(
                                     &mut pending,
@@ -113,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         watcher::WatcherEvent::Modify(path) => {
-                            if path.extension().and_then(|e| e.to_str()) == Some("vpk") {
+                            if is_watched_map_path(&addons_dir_watcher, &path) {
                                 let is_new = !pending.contains_key(&path);
                                 schedule_pending(
                                     &mut pending,
@@ -128,11 +129,13 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         watcher::WatcherEvent::Remove(path) => {
-                            info!(path = %path.display(), "File removed from addons directory");
-                            pending.remove(&path);
-                            last_unstable_log.remove(&path);
-                            if let Err(e) = installer_watcher.remove_map_by_path(path).await {
-                                warn!(error = %e, "Failed to remove map from registry after file deletion");
+                            if is_watched_map_path(&addons_dir_watcher, &path) {
+                                info!(path = %path.display(), "File removed from addons directory");
+                                pending.remove(&path);
+                                last_unstable_log.remove(&path);
+                                if let Err(e) = installer_watcher.remove_map_by_path(path).await {
+                                    warn!(error = %e, "Failed to remove map from registry after file deletion");
+                                }
                             }
                         }
                     }

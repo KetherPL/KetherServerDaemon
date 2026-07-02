@@ -24,8 +24,8 @@ Configuration is loaded from `config.toml` (or path in `KETHER_CONFIG`). Environ
 | `KETHER_CONFIG` | Path to config TOML |
 | `KETHER_L4D2_SERVER_DIR` | L4D2 server root (addons at `{dir}/left4dead2/addons`) |
 | `KETHER_REGISTRY_PATH` | JSON map registry file |
-| `KETHER_BACKEND_API_URL` | Remote sync API base URL |
-| `KETHER_BACKEND_API_KEY` | Bearer token for backend API |
+| `KETHER_BACKEND_API_URL` | Remote sync API base URL (website-server: `http://127.0.0.1:3001/api`) |
+| `KETHER_BACKEND_API_KEY` | Bearer token for backend API (must match website-server `[server_daemon].sync_api_key`) |
 | `KETHER_LOCAL_API_BIND` | Local HTTP API bind address (default `127.0.0.1:8080`) |
 | `KETHER_SYNC_INTERVAL_SECS` | Backend sync interval |
 | `KETHER_LOG_LEVEL` | `trace`, `debug`, `info`, `warn`, `error` |
@@ -64,6 +64,24 @@ Default bind: `http://127.0.0.1:8080`
 | POST | `/api/maps/compact` | Compact registry |
 
 Responses use `{ "success": true, "data": ... }` or `{ "success": false, "error": "..." }`.
+
+## Backend sync (website-server)
+
+The daemon pushes its map registry to the website backend and polls for pending updates:
+
+| Method | Path (relative to `backend_api_url`) | Auth |
+|--------|--------------------------------------|------|
+| POST | `/registry/sync` | `Authorization: Bearer <backend_api_key>` |
+| GET | `/registry/updates` | same Bearer token |
+
+Example `config.toml` when website-server runs on port **3001**:
+
+```toml
+backend_api_url = "http://127.0.0.1:3001/api"
+backend_api_key = "your-shared-secret"
+```
+
+The public website reads installed maps from `GET http://127.0.0.1:3001/api/maps` (no auth).
 
 ## Systemd
 

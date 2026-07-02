@@ -13,16 +13,16 @@ use crate::registry::models::{MapEntry, SourceKind};
 impl MapInstallationService {
     /// Sync a map file with the registry: register new VPKs or refresh changed checksums.
     pub async fn sync_map_from_path(&self, path: PathBuf) -> anyhow::Result<Option<MapEntry>> {
+        if !helpers::is_watched_map_path(&self.addons_dir, &path) {
+            return Ok(None);
+        }
+
         let _guard = self.op_lock.lock().await;
 
         let relative_path = match helpers::addons_relative_path(&self.addons_dir, &path) {
             Some(rel) => rel,
             None => return Ok(None),
         };
-
-        if path.extension().and_then(|e| e.to_str()) != Some("vpk") {
-            return Ok(None);
-        }
 
         if let Some(existing) = self.find_map_by_installed_path(&relative_path).await? {
             let Some(mut fresh_entry) = self.build_map_entry_from_file(&path, &relative_path).await?
@@ -45,6 +45,10 @@ impl MapInstallationService {
 
     /// Remove a registry entry when its map file was deleted from disk.
     pub async fn remove_map_by_path(&self, path: PathBuf) -> anyhow::Result<Option<u64>> {
+        if !helpers::is_watched_map_path(&self.addons_dir, &path) {
+            return Ok(None);
+        }
+
         let _guard = self.op_lock.lock().await;
 
         let relative_path = match path.strip_prefix(&self.addons_dir) {
@@ -96,6 +100,10 @@ impl MapInstallationService {
         };
 
         for path in vpk_files {
+            if !helpers::is_watched_map_path(&self.addons_dir, &path) {
+                continue;
+            }
+
             let relative_path = match path.strip_prefix(&self.addons_dir) {
                 Ok(relative) => relative.to_string_lossy().to_string(),
                 Err(_) => {
