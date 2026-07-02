@@ -17,7 +17,7 @@ Binary: `target/release/KetherServerDaemon`
 
 ## Configuration
 
-Configuration is loaded from `config.toml` (or path in `KETHER_CONFIG`). Environment variables override file values:
+Configuration is loaded from `config.toml` (or path in `KETHER_CONFIG`). If the file does not exist, a commented default file is created on first startup. Environment variables override file values:
 
 | Variable | Description |
 |----------|-------------|

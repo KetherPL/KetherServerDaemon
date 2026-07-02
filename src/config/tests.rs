@@ -11,7 +11,6 @@ use crate::config::env::keys;
 use crate::config::model::Config;
 use crate::config::test_support::{
     clear_kether_env_vars, remove_env_var, set_env_var, with_env_var, with_isolated_config,
-    ISOLATED_CONFIG_PATH,
 };
 
 #[test]
@@ -19,7 +18,7 @@ fn test_default_config() {
     let config = Config::default();
     assert_eq!(config.l4d2_server_dir, PathBuf::from("/home/steam/l4d2"));
     assert_eq!(config.registry_path, PathBuf::from("registry.json"));
-    assert_eq!(config.backend_api_url, "http://localhost:3000/api");
+    assert_eq!(config.backend_api_url, "http://127.0.0.1:3001/api");
     assert_eq!(config.backend_api_key, None);
     assert_eq!(
         config.local_api_bind,
@@ -46,11 +45,33 @@ fn test_addons_dir() {
 #[test]
 #[serial]
 fn test_load_missing_config_file() {
-    with_isolated_config(|| {
-        let config = Config::load().unwrap();
-        assert_eq!(config.l4d2_server_dir, PathBuf::from("/home/steam/l4d2"));
-        assert_eq!(config.registry_path, PathBuf::from("registry.json"));
-    });
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let config_path = temp_dir.path().join("config.toml");
+    assert!(!config_path.exists());
+
+    let original_config = std::env::var(keys::CONFIG).ok();
+    clear_kether_env_vars();
+    set_env_var(keys::CONFIG, config_path.to_str().unwrap());
+
+    let config = Config::load().expect("load should create default config file");
+    assert!(config_path.exists());
+    assert_eq!(config.l4d2_server_dir, PathBuf::from("/home/steam/l4d2"));
+    assert_eq!(config.registry_path, PathBuf::from("registry.json"));
+    assert_eq!(config.backend_api_url, "http://127.0.0.1:3001/api");
+    assert_eq!(
+        config.local_api_bind,
+        SocketAddr::from_str("127.0.0.1:8080").unwrap()
+    );
+
+    let written = fs::read_to_string(&config_path).expect("read created config");
+    assert!(written.contains("backend_api_url"));
+    assert!(written.contains("local_api_bind"));
+
+    if let Some(val) = original_config {
+        set_env_var(keys::CONFIG, &val);
+    } else {
+        remove_env_var(keys::CONFIG);
+    }
 }
 
 #[test]

@@ -66,7 +66,7 @@ impl Default for Config {
         Self {
             l4d2_server_dir: PathBuf::from("/home/steam/l4d2"),
             registry_path: PathBuf::from("registry.json"),
-            backend_api_url: String::from("http://localhost:3000/api"),
+            backend_api_url: String::from("http://127.0.0.1:3001/api"),
             backend_api_key: None,
             local_api_bind: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
             sync_interval_secs: 300, // 5 minutes
@@ -76,5 +76,60 @@ impl Default for Config {
             max_extraction_file_count: default_max_extraction_file_count(),
             l4d2center_index_url: default_l4d2center_index_url(),
         }
+    }
+}
+
+impl Config {
+    /// Generate a commented default config.toml for first-run setup.
+    pub fn generate_toml_with_comments() -> String {
+        let defaults = Config::default();
+        format!(
+            r#"# KetherServerDaemon configuration
+# Environment variables (KETHER_*) override these values.
+
+# Base Left 4 Dead 2 server directory (addons at {{dir}}/left4dead2/addons)
+l4d2_server_dir = "{}"
+
+# JSON map registry file path
+registry_path = "{}"
+
+# Website-server registry sync API (port 3001)
+backend_api_url = "{}"
+
+# Bearer token for backend sync (must match website-server [server_daemon].sync_api_key)
+# backend_api_key = "your-shared-secret"
+
+# Local HTTP API bind address
+local_api_bind = "{}"
+
+# Backend sync interval in seconds
+sync_interval_secs = {}
+
+# Logging level: trace, debug, info, warn, error
+log_level = "{}"
+
+# Maximum download size in bytes (default 1 GiB)
+max_download_size_bytes = {}
+
+# Maximum ZIP extraction size in bytes (default 1 GiB)
+max_extraction_size_bytes = {}
+
+# Maximum number of files extracted from a single archive
+max_extraction_file_count = {}
+
+# L4D2Center server map catalog index URL
+l4d2center_index_url = "{}"
+"#,
+            defaults.l4d2_server_dir.display(),
+            defaults.registry_path.display(),
+            defaults.backend_api_url,
+            defaults.local_api_bind,
+            defaults.sync_interval_secs,
+            defaults.log_level,
+            defaults.max_download_size_bytes,
+            defaults.max_extraction_size_bytes,
+            defaults.max_extraction_file_count,
+            defaults.l4d2center_index_url,
+        )
     }
 }
