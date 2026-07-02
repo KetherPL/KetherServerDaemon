@@ -410,8 +410,8 @@ impl Repl {
             );
         }
 
-        for (map_id, error) in &report.failed {
-            eprintln!("  Failed #{}: {error}", map_id);
+        for failure in &report.failed {
+            eprintln!("  Failed #{}: {}", failure.map_id, failure.error);
         }
     }
 
@@ -431,8 +431,8 @@ impl Repl {
             );
         }
 
-        for (map_id, error) in &report.failed {
-            eprintln!("  Failed #{}: {error}", map_id);
+        for failure in &report.failed {
+            eprintln!("  Failed #{}: {}", failure.map_id, failure.error);
         }
     }
 

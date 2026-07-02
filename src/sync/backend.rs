@@ -17,7 +17,7 @@ impl BackendSyncService {
     pub fn new(base_url: String, api_key: Option<String>) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .user_agent("KetherServerDaemon/0.0.1")
+            .user_agent(format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
             .build()?;
         
         Ok(Self {

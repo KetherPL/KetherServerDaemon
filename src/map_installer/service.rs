@@ -14,6 +14,7 @@ use crate::downloader::{
 };
 use crate::extractor::{zip::ZipExtractor, traits::Extractor, vpk::VpkExtractor};
 use crate::registry::{models::{MapEntry, SourceKind}, traits::Registry};
+use serde::{Deserialize, Serialize};
 
 pub struct MapInstallationService {
     registry: Arc<dyn Registry>,
@@ -26,6 +27,7 @@ pub struct MapInstallationService {
     op_lock: Mutex<()>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryReport {
     pub added: Vec<MapEntry>,
     pub updated: Vec<MapEntry>,
@@ -33,22 +35,31 @@ pub struct DiscoveryReport {
     pub failed: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactReport {
     pub removed: Vec<MapEntry>,
     pub kept: Vec<MapEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkshopUpdateAvailable {
     pub map: MapEntry,
     pub workshop_id: u64,
     pub steam_updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapOperationFailure {
+    pub map_id: u64,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkshopUpdateReport {
     pub updated: Vec<MapEntry>,
     pub available: Vec<WorkshopUpdateAvailable>,
     pub skipped: usize,
-    pub failed: Vec<(u64, String)>,
+    pub failed: Vec<MapOperationFailure>,
     pub not_workshop: usize,
 }
 
@@ -71,8 +82,10 @@ pub fn needs_workshop_update(
     true
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum DiscoveryMode {
+    #[default]
     Add,
     Update,
     ForceUpdate,
@@ -1141,10 +1154,10 @@ impl MapInstallationService {
             let workshop_id = candidate.workshop_id;
 
             let Some(detail) = details_by_id.get(&workshop_id) else {
-                report.failed.push((
+                report.failed.push(MapOperationFailure {
                     map_id,
-                    format!("Workshop item {workshop_id} not found on Steam"),
-                ));
+                    error: format!("Workshop item {workshop_id} not found on Steam"),
+                });
                 continue;
             };
 
@@ -1186,7 +1199,10 @@ impl MapInstallationService {
                         error = %error,
                         "Workshop map download failed"
                     );
-                    report.failed.push((map_id, error.to_string()));
+                    report.failed.push(MapOperationFailure {
+                        map_id,
+                        error: error.to_string(),
+                    });
                     continue;
                 }
             };
@@ -1203,7 +1219,10 @@ impl MapInstallationService {
                         error = %error,
                         "Workshop map replace failed"
                     );
-                    report.failed.push((map_id, error.to_string()));
+                    report.failed.push(MapOperationFailure {
+                        map_id,
+                        error: error.to_string(),
+                    });
                 }
             }
         }

@@ -7,7 +7,9 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::registry::{MapEntry, Registry};
-use crate::map_installer::MapInstallationService;
+use crate::map_installer::{
+    CompactReport, DiscoveryMode, DiscoveryReport, MapInstallationService, WorkshopUpdateReport,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstallMapRequest {
@@ -19,6 +21,27 @@ pub struct InstallMapRequest {
     
     /// Optional map name override
     pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateWorkshopRequest {
+    pub map_id: Option<u64>,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub check_only: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiscoverRequest {
+    #[serde(default)]
+    pub mode: DiscoveryMode,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModifyMapRequest {
+    pub field: String,
+    pub value: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,5 +203,278 @@ impl ApiHandlers {
             }
         }
     }
+
+    pub async fn update_workshop_maps(
+        &self,
+        Json(request): Json<UpdateWorkshopRequest>,
+    ) -> Result<Json<ApiResponse<WorkshopUpdateReport>>, StatusCode> {
+        info!(
+            map_id = ?request.map_id,
+            force = request.force,
+            check_only = request.check_only,
+            "Workshop update request received"
+        );
+
+        match self
+            .installer
+            .update_workshop_maps(request.map_id, request.force, request.check_only)
+            .await
+        {
+            Ok(report) => Ok(Json(ApiResponse::success(report))),
+            Err(e) => {
+                let message = e.to_string();
+                if message.contains("not found") {
+                    error!(error = %message, "Workshop update target not found");
+                    return Err(StatusCode::NOT_FOUND);
+                }
+                error!(error = %message, "Workshop update failed");
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    }
+
+    pub async fn discover_maps(
+        &self,
+        Json(request): Json<DiscoverRequest>,
+    ) -> Result<Json<ApiResponse<DiscoveryReport>>, StatusCode> {
+        info!(mode = ?request.mode, "Discover maps request received");
+
+        match self.installer.discover_maps(request.mode).await {
+            Ok(report) => Ok(Json(ApiResponse::success(report))),
+            Err(e) => {
+                error!(error = %e, "Discovery failed");
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    }
+
+    pub async fn compact_registry(
+        &self,
+    ) -> Result<Json<ApiResponse<CompactReport>>, StatusCode> {
+        info!("Compact registry request received");
+
+        match self.installer.compact_registry().await {
+            Ok(report) => Ok(Json(ApiResponse::success(report))),
+            Err(e) => {
+                error!(error = %e, "Compact failed");
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    }
+
+    pub async fn modify_map(
+        &self,
+        Path(id): Path<String>,
+        Json(request): Json<ModifyMapRequest>,
+    ) -> Result<Json<ApiResponse<MapEntry>>, StatusCode> {
+        let map_id = id.parse::<u64>().map_err(|_| {
+            error!(id = %id, "Invalid map ID format (expected integer)");
+            StatusCode::BAD_REQUEST
+        })?;
+
+        if request.field.is_empty() {
+            error!("Modify request missing field name");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        if request.value.len() > 2048 {
+            error!("Modify value too long: {} characters", request.value.len());
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        info!(map_id, field = %request.field, "Modify map request received");
+
+        match self
+            .installer
+            .modify_map_field(map_id, &request.field, &request.value)
+            .await
+        {
+            Ok(map) => Ok(Json(ApiResponse::success(map))),
+            Err(e) => {
+                let message = e.to_string();
+                if message.contains("not found") {
+                    error!(map_id, error = %message, "Map not found for modify");
+                    return Err(StatusCode::NOT_FOUND);
+                }
+                if message.contains("Unknown or read-only field")
+                    || message.contains("Invalid source_kind")
+                    || message.contains("Invalid workshop_id")
+                {
+                    error!(map_id, error = %message, "Invalid modify field or value");
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                error!(map_id, error = %message, "Failed to modify map");
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::models::SourceKind;
+    use crate::registry::traits::Registry;
+    use crate::test_helpers;
+    use axum::extract::Path;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    async fn setup_handlers() -> (ApiHandlers, Arc<dyn Registry>, TempDir, TempDir) {
+        let registry: Arc<dyn Registry> = Arc::new(test_helpers::setup_test_database().await.unwrap());
+        let temp_dir = test_helpers::create_temp_dir();
+        let addons_dir = test_helpers::create_temp_dir();
+        let installer = Arc::new(
+            MapInstallationService::new(
+                Arc::clone(&registry),
+                addons_dir.path().to_path_buf(),
+                temp_dir.path().to_path_buf(),
+                100 * 1024 * 1024,
+                1024 * 1024 * 1024,
+                10000,
+            )
+            .await
+            .unwrap(),
+        );
+        (
+            ApiHandlers::new(Arc::clone(&registry), installer),
+            registry,
+            addons_dir,
+            temp_dir,
+        )
+    }
+
+    fn sample_map() -> MapEntry {
+        MapEntry {
+            id: 0,
+            name: "Test Map".to_string(),
+            source_url: "https://example.com/map.zip".to_string(),
+            source_kind: SourceKind::Other,
+            workshop_id: None,
+            installed_path: "test_map.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
+            version: None,
+            checksum: None,
+            checksum_kind: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_modify_map_success() {
+        let (handlers, registry, _addons_dir, _temp_dir) = setup_handlers().await;
+        let id = registry.add_map(sample_map()).await.unwrap();
+
+        let response = handlers
+            .modify_map(
+                Path(id.to_string()),
+                Json(ModifyMapRequest {
+                    field: "name".to_string(),
+                    value: "Renamed Map".to_string(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.0.success);
+        assert_eq!(response.0.data.as_ref().unwrap().name, "Renamed Map");
+    }
+
+    #[tokio::test]
+    async fn test_modify_map_not_found() {
+        let (handlers, _registry, _addons_dir, _temp_dir) = setup_handlers().await;
+
+        let result = handlers
+            .modify_map(
+                Path("99999".to_string()),
+                Json(ModifyMapRequest {
+                    field: "name".to_string(),
+                    value: "Renamed Map".to_string(),
+                }),
+            )
+            .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_modify_map_unknown_field() {
+        let (handlers, registry, _addons_dir, _temp_dir) = setup_handlers().await;
+        let id = registry.add_map(sample_map()).await.unwrap();
+
+        let result = handlers
+            .modify_map(
+                Path(id.to_string()),
+                Json(ModifyMapRequest {
+                    field: "installed_path".to_string(),
+                    value: "other.vpk".to_string(),
+                }),
+            )
+            .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_discover_maps_empty_addons() {
+        let (handlers, _registry, _addons_dir, _temp_dir) = setup_handlers().await;
+
+        let response = handlers
+            .discover_maps(Json(DiscoverRequest {
+                mode: DiscoveryMode::Add,
+            }))
+            .await
+            .unwrap();
+
+        assert!(response.0.success);
+        let report = response.0.data.unwrap();
+        assert!(report.added.is_empty());
+        assert!(report.updated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_compact_registry_empty() {
+        let (handlers, _registry, _addons_dir, _temp_dir) = setup_handlers().await;
+
+        let response = handlers.compact_registry().await.unwrap();
+
+        assert!(response.0.success);
+        let report = response.0.data.unwrap();
+        assert!(report.removed.is_empty());
+        assert!(report.kept.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_workshop_maps_empty_registry() {
+        let (handlers, _registry, _addons_dir, _temp_dir) = setup_handlers().await;
+
+        let response = handlers
+            .update_workshop_maps(Json(UpdateWorkshopRequest {
+                map_id: None,
+                force: false,
+                check_only: true,
+            }))
+            .await
+            .unwrap();
+
+        assert!(response.0.success);
+        let report = response.0.data.unwrap();
+        assert!(report.available.is_empty());
+        assert!(report.updated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_workshop_maps_map_not_found() {
+        let (handlers, _registry, _addons_dir, _temp_dir) = setup_handlers().await;
+
+        let result = handlers
+            .update_workshop_maps(Json(UpdateWorkshopRequest {
+                map_id: Some(99999),
+                force: false,
+                check_only: true,
+            }))
+            .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+    }
+}
