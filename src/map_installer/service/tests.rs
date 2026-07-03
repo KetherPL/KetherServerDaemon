@@ -276,11 +276,97 @@ async fn setup_test_service() -> (MapInstallationService, Arc<dyn Registry>, tes
         let id = registry.add_map(create_modify_test_entry()).await.unwrap();
 
         let result = service
-            .modify_map_field(id, "installed_path", "other.vpk")
+            .modify_map_field(id, "checksum", "abc123")
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Unknown or read-only field"));
+    }
+
+    #[tokio::test]
+    async fn test_modify_installed_path_renames_file_and_updates_registry() {
+        let (service, registry, dirs) = setup_test_service().await;
+        let addons = dirs.addons_path();
+        let old_path = addons.join("test_map.vpk");
+        test_helpers::write_minimal_test_vpk(&old_path, "Test Map").unwrap();
+
+        let id = registry.add_map(create_modify_test_entry()).await.unwrap();
+
+        let updated = service
+            .modify_map_field(id, "installed_path", "renamed.vpk")
+            .await
+            .unwrap();
+
+        assert_eq!(updated.installed_path, "renamed.vpk");
+        assert!(!old_path.exists());
+        assert!(addons.join("renamed.vpk").exists());
+
+        let retrieved = registry.get_map(id).await.unwrap().unwrap();
+        assert_eq!(retrieved.installed_path, "renamed.vpk");
+    }
+
+    #[tokio::test]
+    async fn test_modify_installed_path_workshop_subdir() {
+        let (service, registry, dirs) = setup_test_service().await;
+        let addons = dirs.addons_path();
+        let old_path = addons.join("test_map.vpk");
+        test_helpers::write_minimal_test_vpk(&old_path, "Test Map").unwrap();
+
+        let id = registry.add_map(create_modify_test_entry()).await.unwrap();
+
+        let updated = service
+            .modify_map_field(id, "installed_path", "workshop/renamed.vpk")
+            .await
+            .unwrap();
+
+        assert_eq!(updated.installed_path, "workshop/renamed.vpk");
+        assert!(!old_path.exists());
+        assert!(addons.join("workshop/renamed.vpk").exists());
+    }
+
+    #[tokio::test]
+    async fn test_modify_installed_path_registry_only_when_source_missing() {
+        let (service, registry, _dirs) = setup_test_service().await;
+        let id = registry.add_map(create_modify_test_entry()).await.unwrap();
+
+        let updated = service
+            .modify_map_field(id, "installed_path", "renamed.vpk")
+            .await
+            .unwrap();
+
+        assert_eq!(updated.installed_path, "renamed.vpk");
+
+        let retrieved = registry.get_map(id).await.unwrap().unwrap();
+        assert_eq!(retrieved.installed_path, "renamed.vpk");
+    }
+
+    #[tokio::test]
+    async fn test_modify_installed_path_rejects_conflict() {
+        let (service, registry, dirs) = setup_test_service().await;
+        let addons = dirs.addons_path();
+        test_helpers::write_minimal_test_vpk(&addons.join("test_map.vpk"), "Test Map").unwrap();
+        test_helpers::write_minimal_test_vpk(&addons.join("taken.vpk"), "Taken").unwrap();
+
+        let id = registry.add_map(create_modify_test_entry()).await.unwrap();
+
+        let result = service
+            .modify_map_field(id, "installed_path", "taken.vpk")
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("file already exists"));
+
+        let mut other = create_modify_test_entry();
+        other.installed_path = "other_map.vpk".to_string();
+        let other_id = registry.add_map(other).await.unwrap();
+
+        let result = service
+            .modify_map_field(id, "installed_path", "other_map.vpk")
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains(&format!("already used by map #{other_id}")));
     }
 
     #[tokio::test]

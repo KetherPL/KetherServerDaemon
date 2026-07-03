@@ -75,8 +75,8 @@ async fn test_modify_map_unknown_field() {
         .modify_map(
             Path(id.to_string()),
             Json(ModifyMapRequest {
-                field: "installed_path".to_string(),
-                value: "other.vpk".to_string(),
+                field: "checksum".to_string(),
+                value: "abc123".to_string(),
             }),
         )
         .await;
@@ -85,6 +85,35 @@ async fn test_modify_map_unknown_field() {
         result.unwrap_err().status_code(),
         axum::http::StatusCode::BAD_REQUEST
     );
+}
+
+#[tokio::test]
+async fn test_modify_map_installed_path_success() {
+    use crate::test_helpers;
+
+    let (handlers, registry, dirs) = setup_api_fixture().await;
+    let addons = dirs.addons_path();
+    test_helpers::write_minimal_test_vpk(&addons.join("test_map.vpk"), "Test Map").unwrap();
+    let id = registry.add_map(sample_map()).await.unwrap();
+
+    let response = handlers
+        .modify_map(
+            Path(id.to_string()),
+            Json(ModifyMapRequest {
+                field: "installed_path".to_string(),
+                value: "renamed.vpk".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.0.success);
+    assert_eq!(
+        response.0.data.as_ref().unwrap().installed_path,
+        "renamed.vpk"
+    );
+    assert!(!addons.join("test_map.vpk").exists());
+    assert!(addons.join("renamed.vpk").exists());
 }
 
 #[tokio::test]

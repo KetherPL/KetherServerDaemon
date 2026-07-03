@@ -35,6 +35,11 @@ pub fn classify_modify_error(err: anyhow::Error) -> ApiError {
     if message.contains("Unknown or read-only field")
         || message.contains("Invalid source_kind")
         || message.contains("Invalid workshop_id")
+        || message.contains("Invalid installed_path")
+        || message.contains("installed_path cannot be empty")
+        || message.contains("file already exists")
+        || message.contains("already used by map")
+        || message.contains("Path contains parent directory reference")
     {
         error!(error = %message, "Invalid modify field or value");
         return ApiError::bad_request(message);

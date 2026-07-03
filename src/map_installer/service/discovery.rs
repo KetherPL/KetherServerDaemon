@@ -277,14 +277,81 @@ impl MapInstallationService {
                 entry.source_kind = SourceKind::Workshop;
                 entry.source_url = workshop_source_url(wid);
             }
+            "installed_path" | "path" => {
+                self.apply_installed_path_change(&mut entry, value).await?;
+            }
             other => {
                 return Err(anyhow::anyhow!(
-                    "Unknown or read-only field '{other}'. Editable: name, source_url, version, source_kind, workshop_id"
+                    "Unknown or read-only field '{other}'. Editable: name, source_url, version, source_kind, workshop_id, installed_path"
                 ));
             }
         }
 
         self.registry.update_map(entry.clone()).await?;
         Ok(entry)
+    }
+
+    async fn apply_installed_path_change(
+        &self,
+        entry: &mut MapEntry,
+        value: &str,
+    ) -> anyhow::Result<()> {
+        use crate::utils::validate_path_within_base_new;
+
+        let new_relative = helpers::normalize_addons_relative_path(value)?;
+
+        if new_relative == entry.installed_path {
+            return Ok(());
+        }
+
+        let old_abs = self.addons_dir.join(&entry.installed_path);
+        let new_abs = self.addons_dir.join(&new_relative);
+
+        validate_path_within_base_new(&new_abs, &self.addons_dir)
+            .with_context(|| format!("Invalid installed_path '{new_relative}'"))?;
+
+        if !helpers::is_watched_map_path(&self.addons_dir, &new_abs) {
+            return Err(anyhow::anyhow!(
+                "Invalid installed_path '{new_relative}': must be a .vpk at addons root or under workshop/"
+            ));
+        }
+
+        if let Some(other) = self.find_map_by_installed_path(&new_relative).await? {
+            if other.id != entry.id {
+                return Err(anyhow::anyhow!(
+                    "Invalid installed_path '{new_relative}': already used by map #{}",
+                    other.id
+                ));
+            }
+        }
+
+        if new_abs.exists() && new_abs != old_abs {
+            return Err(anyhow::anyhow!(
+                "Invalid installed_path '{new_relative}': file already exists"
+            ));
+        }
+
+        if tokio::fs::metadata(&old_abs).await.is_ok() {
+            if let Some(parent) = new_abs.parent() {
+                tokio::fs::create_dir_all(parent).await.with_context(|| {
+                    format!("Failed to create parent directory for '{new_relative}'")
+                })?;
+            }
+            tokio::fs::rename(&old_abs, &new_abs).await.with_context(|| {
+                format!(
+                    "Failed to rename map file from '{}' to '{new_relative}'",
+                    entry.installed_path
+                )
+            })?;
+            info!(
+                old_path = %entry.installed_path,
+                new_path = %new_relative,
+                map_id = entry.id,
+                "Renamed map file on disk"
+            );
+        }
+
+        entry.installed_path = new_relative;
+        Ok(())
     }
 }

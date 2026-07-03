@@ -150,7 +150,7 @@ impl Repl {
         println!("  scan, discover, d [u|U] - Local addons scan (d u = refresh metadata only)");
         println!("  compact - Remove orphaned records, sort by name, reindex IDs from 1");
         println!("  info <id> - Show all stored fields for a map");
-        println!("  modify <id> <field> <value> - Edit a field (name, source_url, version, source_kind, workshop_id)");
+        println!("  modify <id> <field> <value> - Edit a field (name, source_url, version, source_kind, workshop_id, installed_path; renames file when present)");
         println!("  l4d2center, l4c list - List L4D2Center catalog maps and install status");
         println!("  l4d2center install <name> - Install a map from the L4D2Center catalog");
         println!("  l4d2center update [id|name] [--check] [--force] - Check or update L4D2Center maps");

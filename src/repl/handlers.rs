@@ -216,7 +216,7 @@ impl Repl {
 
         if args.len() < 3 {
             println!(
-                "Usage: modify <id> <field> <value>\nEditable fields: name, source_url, version, source_kind, workshop_id"
+                "Usage: modify <id> <field> <value>\nEditable fields: name, source_url, version, source_kind, workshop_id, installed_path (renames file when present)"
             );
             return;
         }

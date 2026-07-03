@@ -37,6 +37,47 @@ pub fn is_watched_map_path(addons_dir: &Path, path: &Path) -> bool {
     }
 }
 
+/// Normalize a user-supplied path relative to the addons directory.
+pub fn normalize_addons_relative_path(value: &str) -> anyhow::Result<String> {
+    use std::path::Component;
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!("installed_path cannot be empty"));
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return Err(anyhow::anyhow!(
+            "Invalid installed_path '{trimmed}': must be relative to addons directory"
+        ));
+    }
+
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(anyhow::anyhow!(
+                    "Invalid installed_path '{trimmed}': path must not contain '..'"
+                ));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(anyhow::anyhow!(
+                    "Invalid installed_path '{trimmed}': must be relative to addons directory"
+                ));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(anyhow::anyhow!("installed_path cannot be empty"));
+    }
+
+    Ok(normalized.to_string_lossy().to_string())
+}
+
 pub fn source_kind_from_url(url: &str) -> SourceKind {
     let lower = url.to_lowercase();
     if lower.contains("l4d2center.com") {
@@ -110,6 +151,31 @@ mod tests {
     fn is_watched_map_path_rejects_outside_addons() {
         let addons = addons_dir();
         assert!(!is_watched_map_path(&addons, Path::new("/tmp/map.vpk")));
+    }
+
+    #[test]
+    fn normalize_addons_relative_path_accepts_root_and_workshop() {
+        assert_eq!(
+            normalize_addons_relative_path("map.vpk").unwrap(),
+            "map.vpk"
+        );
+        assert_eq!(
+            normalize_addons_relative_path("workshop/123.vpk").unwrap(),
+            "workshop/123.vpk"
+        );
+        assert_eq!(
+            normalize_addons_relative_path("  workshop/nested/map.vpk  ").unwrap(),
+            "workshop/nested/map.vpk"
+        );
+    }
+
+    #[test]
+    fn normalize_addons_relative_path_rejects_invalid() {
+        assert!(normalize_addons_relative_path("").is_err());
+        assert!(normalize_addons_relative_path("   ").is_err());
+        assert!(normalize_addons_relative_path("/absolute/map.vpk").is_err());
+        assert!(normalize_addons_relative_path("../map.vpk").is_err());
+        assert!(normalize_addons_relative_path("workshop/../map.vpk").is_err());
     }
 
     #[test]
