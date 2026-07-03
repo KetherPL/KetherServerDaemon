@@ -22,6 +22,10 @@ pub fn classify_l4d2center_error(err: anyhow::Error) -> ApiError {
         error!(error = %message, "L4D2Center request target not found");
         return ApiError::not_found(message);
     }
+    if message.contains("is not an L4d2Center map") {
+        error!(error = %message, "L4D2Center update target invalid");
+        return ApiError::bad_request(message);
+    }
     error!(error = %message, "L4D2Center operation failed");
     ApiError::internal(message)
 }

@@ -114,6 +114,8 @@ impl MapInstallationService {
             not_l4d2center: 0,
         };
 
+        let index_entries = fetch_index(index_url).await?;
+
         let entries = if let Some(id) = map_id {
             match self.registry.get_map(id).await? {
                 Some(entry) => vec![entry],
@@ -125,13 +127,26 @@ impl MapInstallationService {
                 None => anyhow::bail!("Map '{catalog_name}' not installed"),
             }
         } else {
-            self.registry.list_maps().await?
+            self.registry
+                .list_maps()
+                .await?
+                .into_iter()
+                .filter(|entry| entry.source_kind == SourceKind::L4d2Center)
+                .collect()
         };
 
-        let index_entries = fetch_index(index_url).await?;
+        let targeted = map_id.is_some() || name.is_some();
 
         for entry in entries {
             if entry.source_kind != SourceKind::L4d2Center {
+                if targeted {
+                    if let Some(id) = map_id {
+                        anyhow::bail!("Map #{id} is not an L4d2Center map");
+                    }
+                    if let Some(catalog_name) = name {
+                        anyhow::bail!("Map '{catalog_name}' is not an L4d2Center map");
+                    }
+                }
                 report.not_l4d2center += 1;
                 continue;
             }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use serde::{Deserialize, Serialize};
 
+use crate::registry::models::SourceKind;
 use crate::registry::traits::Registry;
 use crate::utils::{md5_matches, validate_url};
 
@@ -10,6 +11,7 @@ pub enum CatalogMapStatus {
     NotInstalled,
     UpToDate,
     Outdated,
+    OtherSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +75,9 @@ pub async fn enrich_with_registry(
 
             let (installed, map_id, status) = match installed_map {
                 None => (false, None, CatalogMapStatus::NotInstalled),
+                Some(map) if map.source_kind != SourceKind::L4d2Center => {
+                    (true, Some(map.id), CatalogMapStatus::OtherSource)
+                }
                 Some(map) => {
                     let up_to_date = map
                         .checksum

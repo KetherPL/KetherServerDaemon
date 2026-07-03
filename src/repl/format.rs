@@ -162,6 +162,7 @@ fn catalog_status_label(status: &CatalogMapStatus) -> &'static str {
         CatalogMapStatus::NotInstalled => "not_installed",
         CatalogMapStatus::UpToDate => "up_to_date",
         CatalogMapStatus::Outdated => "outdated",
+        CatalogMapStatus::OtherSource => "other_source",
     }
 }
 

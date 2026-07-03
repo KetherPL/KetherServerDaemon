@@ -4,8 +4,9 @@ use crate::registry::SourceKind;
 
 use super::format::source_kind_label;
 use super::parse::{
-    parse_discovery_mode, parse_install_source, parse_l4d2center_subcommand, parse_map_id,
-    parse_update_args, InstallTarget, L4d2CenterSubcommand, UpdateArgs,
+    parse_discovery_mode, parse_install_source, parse_l4d2center_subcommand,
+    parse_l4d2center_update_args, parse_map_id, parse_update_args, InstallTarget,
+    L4d2CenterSubcommand, UpdateArgs,
 };
 
 #[test]
@@ -130,5 +131,43 @@ fn parse_l4d2center_list_subcommand() {
     assert_eq!(
         parse_l4d2center_subcommand(&["list"]).unwrap(),
         L4d2CenterSubcommand::List
+    );
+    assert_eq!(
+        parse_l4d2center_subcommand(&["l"]).unwrap(),
+        L4d2CenterSubcommand::List
+    );
+    assert_eq!(
+        parse_l4d2center_subcommand(&["ls"]).unwrap(),
+        L4d2CenterSubcommand::List
+    );
+}
+
+#[test]
+fn parse_l4d2center_update_subcommand_shortcuts() {
+    use crate::repl::parse::L4d2CenterUpdateArgs;
+
+    assert_eq!(
+        parse_l4d2center_subcommand(&["u", "--check"]).unwrap(),
+        L4d2CenterSubcommand::Update(L4d2CenterUpdateArgs {
+            map_id: None,
+            name: None,
+            force: false,
+            check_only: true,
+        })
+    );
+    assert_eq!(
+        parse_l4d2center_update_args(&["-c"]).unwrap(),
+        L4d2CenterUpdateArgs {
+            map_id: None,
+            name: None,
+            force: false,
+            check_only: true,
+        }
+    );
+    assert_eq!(
+        parse_l4d2center_subcommand(&["i", "widebox1.vpk"]).unwrap(),
+        L4d2CenterSubcommand::Install {
+            name: "widebox1.vpk".to_string()
+        }
     );
 }
