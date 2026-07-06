@@ -56,6 +56,8 @@ pub fn create_test_config() -> (Config, TempDir) {
         max_extraction_size_bytes: 1024 * 1024 * 1024,
         max_extraction_file_count: 10000,
         l4d2center_index_url: Config::default().l4d2center_index_url,
+        hidden_workshop_ids: Vec::new(),
+        hidden_map_ids: Vec::new(),
     };
 
     (config, dir)

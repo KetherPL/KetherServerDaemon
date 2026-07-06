@@ -12,6 +12,8 @@ use crate::api::http::HttpServer;
 #[cfg(test)]
 use crate::map_installer::MapInstallationService;
 #[cfg(test)]
+use crate::maps_denylist::Mapsdenylist;
+#[cfg(test)]
 use crate::registry::traits::Registry;
 #[cfg(test)]
 use crate::test_helpers::{self, TestDirs};
@@ -37,6 +39,7 @@ pub async fn setup_api_fixture() -> (Arc<ApiHandlers>, Arc<dyn Registry>, TestDi
             Arc::clone(&registry),
             installer,
             "https://l4d2center.com/maps/servers/index.json".to_string(),
+            Mapsdenylist::default(),
         )),
         registry,
         dirs,

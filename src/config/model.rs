@@ -43,6 +43,14 @@ pub struct Config {
     /// L4D2Center server map catalog index URL
     #[serde(default = "default_l4d2center_index_url")]
     pub l4d2center_index_url: String,
+
+    /// Steam Workshop addon IDs hidden from website API and backend sync
+    #[serde(default)]
+    pub hidden_workshop_ids: Vec<u64>,
+
+    /// Daemon registry map IDs hidden from website API and backend sync
+    #[serde(default)]
+    pub hidden_map_ids: Vec<u64>,
 }
 
 fn default_max_download_size() -> u64 {
@@ -75,6 +83,8 @@ impl Default for Config {
             max_extraction_size_bytes: default_max_extraction_size(),
             max_extraction_file_count: default_max_extraction_file_count(),
             l4d2center_index_url: default_l4d2center_index_url(),
+            hidden_workshop_ids: Vec::new(),
+            hidden_map_ids: Vec::new(),
         }
     }
 }
@@ -119,6 +129,10 @@ max_extraction_file_count = {}
 
 # L4D2Center server map catalog index URL
 l4d2center_index_url = "{}"
+
+# Maps hidden from website (still installed on server, visible in REPL)
+hidden_workshop_ids = []
+hidden_map_ids = []
 "#,
             defaults.l4d2_server_dir.display(),
             defaults.registry_path.display(),

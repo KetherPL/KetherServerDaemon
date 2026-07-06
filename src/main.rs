@@ -6,6 +6,7 @@ mod downloader;
 mod extractor;
 mod logging;
 mod map_installer;
+mod maps_denylist;
 mod repl;
 mod registry;
 mod sync;
@@ -29,6 +30,7 @@ use sync::{BackendSyncService, SyncService};
 use watcher::{InotifyWatcher, PendingEntry, Watcher, schedule_pending, should_force_sync};
 use api::HttpServer;
 use map_installer::{is_watched_map_path, MapInstallationService};
+use maps_denylist::Mapsdenylist;
 use repl::{DaemonCommand, start_key_listener};
 
 #[tokio::main]
@@ -75,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
         .await?
     );
     info!("Map installation service initialized");
+
+    let maps_denylist = Mapsdenylist::from_config(&config);
 
     let (daemon_tx, mut daemon_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
     
@@ -195,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
     
     let installer_sync = Arc::clone(&installer);
     let sync_service_clone = Arc::clone(&sync_service);
+    let sync_denylist = maps_denylist.clone();
     let sync_interval = config.sync_interval_secs;
     let sync_task = tokio::spawn(async move {
         info!("Sync task started");
@@ -262,7 +267,8 @@ async fn main() -> anyhow::Result<()> {
             // Push local state to backend
             match installer_sync.registry().list_maps().await {
                 Ok(maps) => {
-                    if let Err(e) = sync_service_clone.sync_registry(maps).await {
+                    let visible = sync_denylist.filter_visible(maps);
+                    if let Err(e) = sync_service_clone.sync_registry(visible).await {
                         error!(error = %e, "Failed to sync registry to backend");
                     }
                 }
@@ -283,6 +289,7 @@ async fn main() -> anyhow::Result<()> {
         installer_http,
         http_addr,
         l4d2center_index_url.clone(),
+        maps_denylist,
     );
     let http_task = tokio::spawn(async move {
         if let Err(e) = http_server.serve().await {

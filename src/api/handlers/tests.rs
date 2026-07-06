@@ -2,7 +2,6 @@
 use axum::extract::Path;
 use axum::Json;
 
-use crate::api::handlers::ApiHandlers;
 use crate::api::types::{DiscoverRequest, InstallMapRequest, ModifyMapRequest, UpdateWorkshopRequest};
 use crate::map_installer::DiscoveryMode;
 use crate::registry::models::SourceKind;
@@ -192,6 +191,103 @@ async fn test_list_maps_returns_entries() {
     let maps = response.0.data.unwrap();
     assert_eq!(maps.len(), 1);
     assert_eq!(maps[0].id, id);
+}
+
+#[tokio::test]
+async fn test_list_maps_excludes_denylisted() {
+    use std::sync::Arc;
+
+    use crate::api::handlers::ApiHandlers;
+    use crate::map_installer::MapInstallationService;
+    use crate::maps_denylist::Mapsdenylist;
+    use crate::registry::models::SourceKind;
+
+    let (registry, dirs) = crate::test_helpers::setup_test_dirs().await.unwrap();
+    let paths = dirs.service_paths();
+    let installer = Arc::new(
+        MapInstallationService::new(
+            Arc::clone(&registry),
+            paths.addons_dir,
+            paths.download_dir,
+            100 * 1024 * 1024,
+            1024 * 1024 * 1024,
+            10000,
+        )
+        .await
+        .unwrap(),
+    );
+
+    let visible_id = registry
+        .add_map(MapEntry {
+            id: 0,
+            name: "Visible".to_string(),
+            source_url: String::new(),
+            source_kind: SourceKind::Workshop,
+            workshop_id: Some(111),
+            installed_path: "visible.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
+            version: None,
+            checksum: None,
+            checksum_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let hidden_workshop_id = registry
+        .add_map(MapEntry {
+            id: 0,
+            name: "Hidden Workshop".to_string(),
+            source_url: String::new(),
+            source_kind: SourceKind::Workshop,
+            workshop_id: Some(381419931),
+            installed_path: "hidden_workshop.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
+            version: None,
+            checksum: None,
+            checksum_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let hidden_internal_id = registry
+        .add_map(MapEntry {
+            id: 0,
+            name: "Hidden Internal".to_string(),
+            source_url: "https://example.com/map.zip".to_string(),
+            source_kind: SourceKind::Other,
+            workshop_id: None,
+            installed_path: "hidden_internal.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
+            version: None,
+            checksum: None,
+            checksum_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let mut config = crate::config::Config::default();
+    config.hidden_workshop_ids = vec![381419931];
+    config.hidden_map_ids = vec![hidden_internal_id];
+    let denylist = Mapsdenylist::from_config(&config);
+
+    let handlers = Arc::new(ApiHandlers::new(
+        Arc::clone(&registry),
+        installer,
+        "https://l4d2center.com/maps/servers/index.json".to_string(),
+        denylist,
+    ));
+
+    let response = handlers.list_maps().await.unwrap();
+    let maps = response.0.data.unwrap();
+    assert_eq!(maps.len(), 1);
+    assert_eq!(maps[0].id, visible_id);
+    assert_eq!(maps[0].workshop_id, Some(111));
+
+    let hidden_workshop = registry.get_map(hidden_workshop_id).await.unwrap();
+    assert!(hidden_workshop.is_some());
 }
 
 #[tokio::test]

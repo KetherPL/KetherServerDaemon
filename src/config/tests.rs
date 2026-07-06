@@ -30,6 +30,8 @@ fn test_default_config() {
         config.l4d2center_index_url,
         "https://l4d2center.com/maps/servers/index.json"
     );
+    assert!(config.hidden_workshop_ids.is_empty());
+    assert!(config.hidden_map_ids.is_empty());
 }
 
 #[test]
@@ -211,4 +213,36 @@ fn test_validate_rejects_invalid_log_level() {
 fn test_validate_accepts_valid_config() {
     let (config, _dir) = crate::test_helpers::create_test_config();
     assert!(config.validate().is_ok());
+}
+
+#[test]
+#[serial]
+fn test_load_denylist_from_toml() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let config_content = r#"
+l4d2_server_dir = "/custom/server/path"
+registry_path = "/custom/registry.json"
+backend_api_url = "http://custom-api.example.com"
+local_api_bind = "127.0.0.1:8080"
+sync_interval_secs = 300
+log_level = "info"
+hidden_workshop_ids = [381419931, 123456789]
+hidden_map_ids = [7, 42]
+"#;
+    fs::write(temp_file.path(), config_content).unwrap();
+
+    let original_config = std::env::var(keys::CONFIG).ok();
+    set_env_var(keys::CONFIG, temp_file.path().to_str().unwrap());
+    clear_kether_env_vars();
+    set_env_var(keys::CONFIG, temp_file.path().to_str().unwrap());
+
+    let config = Config::load().unwrap();
+    assert_eq!(config.hidden_workshop_ids, vec![381419931, 123456789]);
+    assert_eq!(config.hidden_map_ids, vec![7, 42]);
+
+    if let Some(val) = original_config {
+        set_env_var(keys::CONFIG, &val);
+    } else {
+        remove_env_var(keys::CONFIG);
+    }
 }
