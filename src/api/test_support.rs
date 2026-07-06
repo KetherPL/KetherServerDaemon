@@ -10,9 +10,9 @@ use crate::api::handlers::ApiHandlers;
 #[cfg(test)]
 use crate::api::http::HttpServer;
 #[cfg(test)]
-use crate::map_installer::MapInstallationService;
+use crate::config::{init_handle, Config};
 #[cfg(test)]
-use crate::maps_denylist::Mapsdenylist;
+use crate::map_installer::MapInstallationService;
 #[cfg(test)]
 use crate::registry::traits::Registry;
 #[cfg(test)]
@@ -34,12 +34,14 @@ pub async fn setup_api_fixture() -> (Arc<ApiHandlers>, Arc<dyn Registry>, TestDi
         .await
         .unwrap(),
     );
+    let mut config = Config::default();
+    config.l4d2center_index_url = "https://l4d2center.com/maps/servers/index.json".to_string();
+    let config_handle = init_handle(config);
     (
         Arc::new(ApiHandlers::new(
             Arc::clone(&registry),
             installer,
-            "https://l4d2center.com/maps/servers/index.json".to_string(),
-            Mapsdenylist::default(),
+            config_handle,
         )),
         registry,
         dirs,

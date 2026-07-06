@@ -18,7 +18,7 @@ impl ApiHandlers {
         &self,
     ) -> Result<Json<ApiResponse<Vec<MapEntry>>>, ApiError> {
         match self.registry.list_maps().await {
-            Ok(maps) => Ok(ok_json(self.denylist.filter_visible(maps))),
+            Ok(maps) => Ok(ok_json(self.denylist().filter_visible(maps))),
             Err(e) => Err(registry_internal_err(e, "Failed to list maps")),
         }
     }

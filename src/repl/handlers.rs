@@ -254,7 +254,7 @@ impl Repl {
             return;
         };
 
-        if self.l4d2center_index_url.is_empty() {
+        if self.l4d2center_index_url().is_empty() {
             eprintln!("L4D2Center index URL is not configured.");
             return;
         }
@@ -267,7 +267,7 @@ impl Repl {
             }
         };
 
-        let index_url = self.l4d2center_index_url.clone();
+        let index_url = self.l4d2center_index_url();
 
         match subcommand {
             L4d2CenterSubcommand::List => {

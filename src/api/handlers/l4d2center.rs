@@ -19,7 +19,7 @@ impl ApiHandlers {
     {
         match self
             .installer
-            .list_l4d2center_catalog(&self.l4d2center_index_url)
+            .list_l4d2center_catalog(&self.l4d2center_index_url())
             .await
         {
             Ok(catalog) => Ok(ok_json(catalog)),
@@ -34,7 +34,7 @@ impl ApiHandlers {
         info!(name = %request.name, "Install L4D2Center map request received");
         match self
             .installer
-            .install_l4d2center_by_name(&self.l4d2center_index_url, &request.name)
+            .install_l4d2center_by_name(&self.l4d2center_index_url(), &request.name)
             .await
         {
             Ok(map_entry) => Ok(ok_json(map_entry)),
@@ -49,7 +49,7 @@ impl ApiHandlers {
         match self
             .installer
             .update_l4d2center_maps(
-                &self.l4d2center_index_url,
+                &self.l4d2center_index_url(),
                 request.map_id,
                 request.name.as_deref(),
                 request.force,

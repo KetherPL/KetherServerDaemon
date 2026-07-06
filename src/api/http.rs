@@ -6,8 +6,8 @@ use tracing::info;
 
 use crate::api::handlers::ApiHandlers;
 use crate::api::routes;
+use crate::config::ConfigHandle;
 use crate::map_installer::MapInstallationService;
-use crate::maps_denylist::Mapsdenylist;
 use crate::registry::Registry;
 
 pub struct HttpServer {
@@ -20,11 +20,10 @@ impl HttpServer {
         registry: Arc<dyn Registry>,
         installer: Arc<MapInstallationService>,
         addr: SocketAddr,
-        l4d2center_index_url: String,
-        denylist: Mapsdenylist,
+        config: ConfigHandle,
     ) -> Self {
         Self {
-            handlers: ApiHandlers::new(registry, installer, l4d2center_index_url, denylist),
+            handlers: ApiHandlers::new(registry, installer, config),
             addr,
         }
     }

@@ -2,6 +2,7 @@
 mod api;
 mod catalog;
 mod config;
+mod config_watch;
 mod downloader;
 mod extractor;
 mod logging;
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 use tokio::signal;
 use tracing::{debug, error, info, warn};
 
-use config::Config;
+use config::{init_handle, read_config, Config};
 use logging::setup_logging;
 use registry::{JsonRegistry, Registry};
 use sync::{BackendSyncService, SyncService};
@@ -33,11 +34,21 @@ use map_installer::{is_watched_map_path, MapInstallationService};
 use maps_denylist::Mapsdenylist;
 use repl::{DaemonCommand, start_key_listener};
 
+fn read_denylist(handle: &config::ConfigHandle) -> Mapsdenylist {
+    Mapsdenylist::from_config(&read_config(handle))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load configuration
-    let config = Config::load()?;
+    let (config, config_path) = Config::load_with_path()?;
     config.validate()?;
+
+    let config_handle = init_handle(config);
+    let _config_watcher = config_watch::spawn_config_watcher(config_handle.clone(), config_path)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let config = read_config(&config_handle);
     
     // Initialize logging
     setup_logging(&config.log_level)?;
@@ -50,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     
     // Initialize sync service
     let sync_service: Arc<dyn SyncService> = Arc::new(
-        BackendSyncService::new(config.backend_api_url.clone(), config.backend_api_key.clone())?
+        BackendSyncService::new(config_handle.clone())?
     );
     
     // Initialize watcher
@@ -77,8 +88,6 @@ async fn main() -> anyhow::Result<()> {
         .await?
     );
     info!("Map installation service initialized");
-
-    let maps_denylist = Mapsdenylist::from_config(&config);
 
     let (daemon_tx, mut daemon_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
     
@@ -199,13 +208,20 @@ async fn main() -> anyhow::Result<()> {
     
     let installer_sync = Arc::clone(&installer);
     let sync_service_clone = Arc::clone(&sync_service);
-    let sync_denylist = maps_denylist.clone();
-    let sync_interval = config.sync_interval_secs;
+    let sync_config_handle = config_handle.clone();
     let sync_task = tokio::spawn(async move {
         info!("Sync task started");
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(sync_interval));
+        let mut interval_secs = read_config(&sync_config_handle).sync_interval_secs;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
         loop {
             interval.tick().await;
+
+            let current_config = read_config(&sync_config_handle);
+            if current_config.sync_interval_secs != interval_secs {
+                interval_secs = current_config.sync_interval_secs;
+                interval =
+                    tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+            }
             
             // Fetch updates from backend
             match sync_service_clone.fetch_updates().await {
@@ -267,7 +283,7 @@ async fn main() -> anyhow::Result<()> {
             // Push local state to backend
             match installer_sync.registry().list_maps().await {
                 Ok(maps) => {
-                    let visible = sync_denylist.filter_visible(maps);
+                    let visible = read_denylist(&sync_config_handle).filter_visible(maps);
                     if let Err(e) = sync_service_clone.sync_registry(visible).await {
                         error!(error = %e, "Failed to sync registry to backend");
                     }
@@ -283,13 +299,12 @@ async fn main() -> anyhow::Result<()> {
     let registry_http = Arc::clone(&registry);
     let installer_http = Arc::clone(&installer);
     let http_addr = config.local_api_bind;
-    let l4d2center_index_url = config.l4d2center_index_url.clone();
+    let http_config_handle = config_handle.clone();
     let http_server = HttpServer::new(
         registry_http,
         installer_http,
         http_addr,
-        l4d2center_index_url.clone(),
-        maps_denylist,
+        http_config_handle,
     );
     let http_task = tokio::spawn(async move {
         if let Err(e) = http_server.serve().await {
@@ -299,8 +314,9 @@ async fn main() -> anyhow::Result<()> {
 
     let repl_tx = daemon_tx.clone();
     let repl_installer = Arc::clone(&installer);
+    let repl_config_handle = config_handle.clone();
     let repl_task = tokio::spawn(async move {
-        if let Err(e) = start_key_listener(repl_tx, repl_installer, l4d2center_index_url).await {
+        if let Err(e) = start_key_listener(repl_tx, repl_installer, repl_config_handle).await {
             error!(error = %e, "REPL key listener error");
         }
     });

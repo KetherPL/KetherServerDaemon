@@ -96,6 +96,8 @@ impl Config {
         format!(
             r#"# KetherServerDaemon configuration
 # Environment variables (KETHER_*) override these values.
+# Saving this file reloads live fields without restart (denylist, sync interval, backend URL, etc.).
+# Restart is required for paths, bind address, download limits, and log level.
 
 # Base Left 4 Dead 2 server directory (addons at {{dir}}/left4dead2/addons)
 l4d2_server_dir = "{}"

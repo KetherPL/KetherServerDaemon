@@ -198,8 +198,8 @@ async fn test_list_maps_excludes_denylisted() {
     use std::sync::Arc;
 
     use crate::api::handlers::ApiHandlers;
+    use crate::config::init_handle;
     use crate::map_installer::MapInstallationService;
-    use crate::maps_denylist::Mapsdenylist;
     use crate::registry::models::SourceKind;
 
     let (registry, dirs) = crate::test_helpers::setup_test_dirs().await.unwrap();
@@ -271,13 +271,12 @@ async fn test_list_maps_excludes_denylisted() {
     let mut config = crate::config::Config::default();
     config.hidden_workshop_ids = vec![381419931];
     config.hidden_map_ids = vec![hidden_internal_id];
-    let denylist = Mapsdenylist::from_config(&config);
+    let config_handle = init_handle(config);
 
     let handlers = Arc::new(ApiHandlers::new(
         Arc::clone(&registry),
         installer,
-        "https://l4d2center.com/maps/servers/index.json".to_string(),
-        denylist,
+        config_handle,
     ));
 
     let response = handlers.list_maps().await.unwrap();
@@ -288,6 +287,95 @@ async fn test_list_maps_excludes_denylisted() {
 
     let hidden_workshop = registry.get_map(hidden_workshop_id).await.unwrap();
     assert!(hidden_workshop.is_some());
+}
+
+#[tokio::test]
+async fn test_list_maps_reflects_hot_reloaded_denylist() {
+    use std::sync::Arc;
+
+    use crate::api::handlers::ApiHandlers;
+    use crate::config::init_handle;
+    use crate::config_watch::apply_reload;
+    use crate::map_installer::MapInstallationService;
+    use crate::registry::models::SourceKind;
+
+    let (registry, dirs) = crate::test_helpers::setup_test_dirs().await.unwrap();
+    let paths = dirs.service_paths();
+    let installer = Arc::new(
+        MapInstallationService::new(
+            Arc::clone(&registry),
+            paths.addons_dir,
+            paths.download_dir,
+            100 * 1024 * 1024,
+            1024 * 1024 * 1024,
+            10000,
+        )
+        .await
+        .unwrap(),
+    );
+
+    registry
+        .add_map(MapEntry {
+            id: 0,
+            name: "Workshop Map".to_string(),
+            source_url: String::new(),
+            source_kind: SourceKind::Workshop,
+            workshop_id: Some(381419931),
+            installed_path: "workshop.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
+            version: None,
+            checksum: None,
+            checksum_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_path = tmp.path().join(crate::config::CONF_FILE_NAME);
+    let initial_toml = r#"
+l4d2_server_dir = "/home/steam/l4d2"
+registry_path = "registry.json"
+backend_api_url = "http://127.0.0.1:3001/api"
+local_api_bind = "127.0.0.1:8080"
+sync_interval_secs = 300
+log_level = "info"
+hidden_workshop_ids = [381419931]
+hidden_map_ids = []
+"#;
+    std::fs::write(&config_path, initial_toml).expect("write config");
+
+    let config = crate::config::Config::load_from(&config_path).expect("load config");
+    let config_handle = init_handle(config);
+    let handlers = Arc::new(ApiHandlers::new(
+        Arc::clone(&registry),
+        installer,
+        config_handle.clone(),
+    ));
+
+    let hidden = handlers.list_maps().await.unwrap();
+    assert!(hidden.0.data.unwrap().is_empty());
+
+    std::fs::write(
+        &config_path,
+        r#"
+l4d2_server_dir = "/home/steam/l4d2"
+registry_path = "registry.json"
+backend_api_url = "http://127.0.0.1:3001/api"
+local_api_bind = "127.0.0.1:8080"
+sync_interval_secs = 300
+log_level = "info"
+hidden_workshop_ids = []
+hidden_map_ids = []
+"#,
+    )
+    .expect("write updated config");
+
+    let change = apply_reload(&config_handle, &config_path).expect("reload");
+    assert!(change.live_applied.contains(&"hidden_workshop_ids"));
+
+    let visible = handlers.list_maps().await.unwrap();
+    assert_eq!(visible.0.data.unwrap().len(), 1);
 }
 
 #[tokio::test]

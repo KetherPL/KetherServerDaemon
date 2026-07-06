@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use tokio::sync::mpsc;
 
+use crate::config::ConfigHandle;
 use crate::map_installer::MapInstallationService;
 
 use super::session::Repl;
@@ -11,7 +12,7 @@ use super::session::Repl;
 pub async fn start_key_listener(
     daemon_command_tx: mpsc::UnboundedSender<super::session::DaemonCommand>,
     installer: Arc<MapInstallationService>,
-    l4d2center_index_url: String,
+    config: ConfigHandle,
 ) -> Result<(), String> {
     println!("Press 'C' to open the REPL console");
 
@@ -41,7 +42,7 @@ pub async fn start_key_listener(
             let repl = Repl::new_with_command_tx(
                 daemon_command_tx.clone(),
                 Arc::clone(&installer),
-                l4d2center_index_url.clone(),
+                config.clone(),
             );
             if let Err(err) = repl.run().await {
                 eprintln!("REPL error: {err}");

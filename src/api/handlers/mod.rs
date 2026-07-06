@@ -12,6 +12,7 @@ use axum::Json;
 
 use crate::api::error::ApiError;
 use crate::api::response::ApiResponse;
+use crate::config::{read_config, ConfigHandle};
 use crate::map_installer::MapInstallationService;
 use crate::maps_denylist::Mapsdenylist;
 use crate::registry::Registry;
@@ -19,23 +20,28 @@ use crate::registry::Registry;
 pub struct ApiHandlers {
     pub(super) registry: Arc<dyn Registry>,
     pub(super) installer: Arc<MapInstallationService>,
-    pub(super) l4d2center_index_url: String,
-    pub(super) denylist: Mapsdenylist,
+    pub(super) config: ConfigHandle,
 }
 
 impl ApiHandlers {
     pub fn new(
         registry: Arc<dyn Registry>,
         installer: Arc<MapInstallationService>,
-        l4d2center_index_url: String,
-        denylist: Mapsdenylist,
+        config: ConfigHandle,
     ) -> Self {
         Self {
             registry,
             installer,
-            l4d2center_index_url,
-            denylist,
+            config,
         }
+    }
+
+    pub(super) fn denylist(&self) -> Mapsdenylist {
+        Mapsdenylist::from_config(&read_config(&self.config))
+    }
+
+    pub(super) fn l4d2center_index_url(&self) -> String {
+        read_config(&self.config).l4d2center_index_url.clone()
     }
 }
 

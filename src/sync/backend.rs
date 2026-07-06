@@ -3,18 +3,18 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
+use crate::config::{read_config, ConfigHandle};
 use crate::registry::models::MapEntry;
 use crate::sync::traits::{MapUpdate, SyncService};
 
 #[derive(Debug, Clone)]
 pub struct BackendSyncService {
     client: Client,
-    base_url: String,
-    api_key: Option<String>,
+    config: ConfigHandle,
 }
 
 impl BackendSyncService {
-    pub fn new(base_url: String, api_key: Option<String>) -> anyhow::Result<Self> {
+    pub fn new(config: ConfigHandle) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .user_agent(format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
@@ -22,16 +22,16 @@ impl BackendSyncService {
         
         Ok(Self {
             client,
-            base_url,
-            api_key,
+            config,
         })
     }
     
     fn build_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let url = format!("{}/{}", self.base_url.trim_end_matches('/'), path);
+        let snapshot = read_config(&self.config);
+        let url = format!("{}/{}", snapshot.backend_api_url.trim_end_matches('/'), path);
         let mut request = self.client.request(method, &url);
 
-        if let Some(ref key) = self.api_key {
+        if let Some(ref key) = snapshot.backend_api_key {
             request = request.header("Authorization", format!("Bearer {}", key));
         }
 
@@ -109,6 +109,7 @@ impl SyncService for BackendSyncService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{init_handle, Config};
     use crate::registry::models::SourceKind;
     use crate::sync::traits::SyncService;
     use axum::{Json, Router, routing::{get, post}};
@@ -202,6 +203,13 @@ mod tests {
         }
     }
 
+    fn service_with_url(base_url: String, api_key: Option<String>) -> BackendSyncService {
+        let mut config = Config::default();
+        config.backend_api_url = base_url;
+        config.backend_api_key = api_key;
+        BackendSyncService::new(init_handle(config)).unwrap()
+    }
+
     #[tokio::test]
     async fn test_sync_registry_sends_bearer_token() {
         let auth_header = Arc::new(Mutex::new(None));
@@ -212,8 +220,7 @@ mod tests {
         )
         .await;
 
-        let service =
-            BackendSyncService::new(base_url, Some("secret-token".to_string())).unwrap();
+        let service = service_with_url(base_url, Some("secret-token".to_string()));
         service.sync_registry(vec![sample_map_entry()]).await.unwrap();
 
         let stored = auth_header.lock().await.clone();
@@ -230,7 +237,7 @@ mod tests {
         )
         .await;
 
-        let service = BackendSyncService::new(base_url, None).unwrap();
+        let service = service_with_url(base_url, None);
         let result = service.fetch_updates().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("503"));
@@ -246,11 +253,10 @@ mod tests {
         )
         .await;
 
-        let service = BackendSyncService::new(base_url, None).unwrap();
+        let service = service_with_url(base_url, None);
         let updates = service.fetch_updates().await.unwrap();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].map_id, "42");
         assert_eq!(updates[0].action, "install");
     }
 }
-

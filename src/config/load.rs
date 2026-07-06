@@ -1,19 +1,46 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::env::{self, keys};
 use crate::config::model::Config;
 
+pub const CONF_FILE_NAME: &str = "config.toml";
+
 impl Config {
     /// Load configuration from TOML file with environment variable overrides
     pub fn load() -> anyhow::Result<Self> {
-        let config_path =
-            std::env::var(keys::CONFIG).unwrap_or_else(|_| "config.toml".to_string());
-
-        let mut config = load_from_path(Path::new(&config_path))?;
-        env::apply_env_overrides(&mut config)?;
+        let (config, _) = Self::load_with_path()?;
         Ok(config)
     }
+
+    /// Load configuration and return the resolved config file path for hot reload.
+    pub fn load_with_path() -> anyhow::Result<(Self, PathBuf)> {
+        let config_path = resolve_config_path();
+        let mut config = load_from_path(&config_path)?;
+        env::apply_env_overrides(&mut config)?;
+        let watched_path = canonicalize_config_path(&config_path);
+        Ok((config, watched_path))
+    }
+
+    /// Parse configuration from a TOML string (used by hot reload).
+    pub fn from_toml_str(content: &str) -> anyhow::Result<Self> {
+        Ok(toml::from_str(content)?)
+    }
+
+    /// Load configuration from a specific path without environment overrides.
+    pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+        load_from_path(path)
+    }
+}
+
+fn resolve_config_path() -> PathBuf {
+    std::env::var(keys::CONFIG)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(CONF_FILE_NAME))
+}
+
+fn canonicalize_config_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn load_from_path(path: &Path) -> anyhow::Result<Config> {

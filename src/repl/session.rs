@@ -4,6 +4,7 @@ use std::sync::Arc;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use tokio::sync::mpsc;
 
+use crate::config::ConfigHandle;
 use crate::map_installer::MapInstallationService;
 
 #[derive(Debug, Clone, Copy)]
@@ -16,7 +17,7 @@ pub struct Repl {
     prompt: DefaultPrompt,
     pub(super) daemon_command_tx: Option<mpsc::UnboundedSender<DaemonCommand>>,
     pub(super) installer: Option<Arc<MapInstallationService>>,
-    pub(super) l4d2center_index_url: String,
+    pub(super) config: Option<ConfigHandle>,
 }
 
 impl Repl {
@@ -34,14 +35,14 @@ impl Repl {
             prompt,
             daemon_command_tx: None,
             installer: None,
-            l4d2center_index_url: String::new(),
+            config: None,
         }
     }
 
     pub fn new_with_command_tx(
         daemon_command_tx: mpsc::UnboundedSender<DaemonCommand>,
         installer: Arc<MapInstallationService>,
-        l4d2center_index_url: String,
+        config: ConfigHandle,
     ) -> Self {
         let (editor, prompt) = Self::create_editor();
         Self {
@@ -49,8 +50,15 @@ impl Repl {
             prompt,
             daemon_command_tx: Some(daemon_command_tx),
             installer: Some(installer),
-            l4d2center_index_url,
+            config: Some(config),
         }
+    }
+
+    pub(super) fn l4d2center_index_url(&self) -> String {
+        self.config
+            .as_ref()
+            .map(|handle| crate::config::read_config(handle).l4d2center_index_url.clone())
+            .unwrap_or_default()
     }
 
     pub async fn run(mut self) -> Result<(), String> {

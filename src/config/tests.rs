@@ -216,6 +216,30 @@ fn test_validate_accepts_valid_config() {
 }
 
 #[test]
+fn test_diff_classifies_live_and_restart_fields() {
+    let old = Config::default();
+    let mut new = Config::default();
+    new.hidden_workshop_ids = vec![1];
+    new.sync_interval_secs = 120;
+    new.local_api_bind = SocketAddr::from_str("127.0.0.1:9090").unwrap();
+
+    let change = old.diff(&new);
+    assert!(change.live_applied.contains(&"hidden_workshop_ids"));
+    assert!(change.live_applied.contains(&"sync_interval_secs"));
+    assert!(change.requires_restart.contains(&"local_api_bind"));
+    assert!(!change.unchanged);
+}
+
+#[test]
+fn test_diff_marks_unchanged_when_equal() {
+    let config = Config::default();
+    let change = config.diff(&config);
+    assert!(change.unchanged);
+    assert!(change.live_applied.is_empty());
+    assert!(change.requires_restart.is_empty());
+}
+
+#[test]
 #[serial]
 fn test_load_denylist_from_toml() {
     let temp_file = NamedTempFile::new().unwrap();
