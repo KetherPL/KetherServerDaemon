@@ -527,6 +527,24 @@ async fn setup_test_service() -> (MapInstallationService, Arc<dyn Registry>, tes
     }
 
     #[tokio::test]
+    async fn test_build_map_entry_from_file_uses_filename_fallback_when_metadata_missing() {
+        let (service, _registry, dirs) = setup_test_service().await;
+        let path = dirs.addons_path().join("bts_l4d2.vpk");
+        tokio::fs::write(&path, b"not a vpk").await.unwrap();
+
+        let entry = service
+            .build_map_entry_from_file(&path, "bts_l4d2.vpk")
+            .await
+            .unwrap()
+            .expect("fallback entry");
+
+        assert_eq!(entry.name, "bts_l4d2");
+        assert_eq!(entry.installed_path, "bts_l4d2.vpk");
+        assert!(entry.version.is_none());
+        assert_eq!(entry.source_kind, SourceKind::Other);
+    }
+
+    #[tokio::test]
     async fn test_remove_map_by_path_prunes_when_file_gone() {
         let (service, registry, dirs) = setup_test_service().await;
         let id = registry

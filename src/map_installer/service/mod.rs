@@ -900,16 +900,42 @@ impl MapInstallationService {
         path: &Path,
         relative_path: &str,
     ) -> anyhow::Result<Option<MapEntry>> {
-        let metadata = match self.vpk_extractor.extract_vpk_metadata(path.to_path_buf()).await {
-            Ok(metadata) => metadata,
-            Err(_) => return Ok(None),
-        };
-
         let checksum = crate::utils::calculate_file_md5(path).await.ok();
         let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
         let installed_at = Self::file_modified_time(path)
             .await
             .unwrap_or_else(chrono::Utc::now);
+
+        let metadata = match self.vpk_extractor.extract_vpk_metadata(path.to_path_buf()).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let fallback_name = Path::new(relative_path)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                warn!(
+                    path = %path.display(),
+                    error = %error,
+                    fallback_name,
+                    "VPK metadata unavailable, using filename fallback"
+                );
+                return Ok(Some(MapEntry {
+                    id: 0,
+                    name: fallback_name,
+                    source_url: format!("detected:{}", path.display()),
+                    source_kind: SourceKind::Other,
+                    workshop_id: None,
+                    installed_path: relative_path.to_string(),
+                    installed_at,
+                    workshop_updated_at: None,
+                    version: None,
+                    checksum,
+                    checksum_kind,
+                }));
+            }
+        };
 
         let (source_kind, workshop_id, source_url) = match metadata.workshop_id {
             Some(workshop_id) => (
