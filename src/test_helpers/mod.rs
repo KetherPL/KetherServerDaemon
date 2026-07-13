@@ -50,7 +50,6 @@ pub fn create_test_config() -> (Config, TempDir) {
         backend_api_url: Config::default().backend_api_url,
         backend_api_key: None,
         local_api_bind: SocketAddr::from_str("127.0.0.1:0").unwrap(),
-        local_api_key: None,
         sync_interval_secs: 60,
         log_level: "error".to_string(),
         max_download_size_bytes: 100 * 1024 * 1024,

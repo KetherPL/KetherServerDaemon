@@ -24,7 +24,6 @@ fn test_default_config() {
         config.local_api_bind,
         SocketAddr::from_str("127.0.0.1:8080").unwrap()
     );
-    assert_eq!(config.local_api_key, None);
     assert_eq!(config.sync_interval_secs, 300);
     assert_eq!(config.log_level, "info");
     assert_eq!(
@@ -87,7 +86,6 @@ registry_path = "/custom/registry.json"
 backend_api_url = "http://custom-api.example.com"
 backend_api_key = "test-key-123"
 local_api_bind = "0.0.0.0:9000"
-local_api_key = "local-key-123"
 sync_interval_secs = 600
 log_level = "debug"
 "#;
@@ -113,7 +111,6 @@ log_level = "debug"
         config.local_api_bind,
         SocketAddr::from_str("0.0.0.0:9000").unwrap()
     );
-    assert_eq!(config.local_api_key, Some("local-key-123".to_string()));
     assert_eq!(config.sync_interval_secs, 600);
     assert_eq!(config.log_level, "debug");
 
@@ -173,13 +170,6 @@ fn test_env_var_overrides() {
             },
         },
         Case {
-            key: keys::LOCAL_API_KEY,
-            value: "env-local-key",
-            assert: |config| {
-                assert_eq!(config.local_api_key, Some("env-local-key".to_string()));
-            },
-        },
-        Case {
             key: keys::SYNC_INTERVAL_SECS,
             value: "120",
             assert: |config| {
@@ -229,17 +219,17 @@ fn test_validate_accepts_valid_config() {
 fn test_validate_rejects_non_loopback_bind_without_api_key() {
     let (mut config, _dir) = crate::test_helpers::create_test_config();
     config.local_api_bind = SocketAddr::from_str("0.0.0.0:8080").unwrap();
-    config.local_api_key = None;
+    config.backend_api_key = None;
 
     let error = config.validate().expect_err("non-loopback bind must require auth");
-    assert!(error.to_string().contains("local_api_key"));
+    assert!(error.to_string().contains("backend_api_key"));
 }
 
 #[test]
 fn test_validate_accepts_non_loopback_bind_with_api_key() {
     let (mut config, _dir) = crate::test_helpers::create_test_config();
     config.local_api_bind = SocketAddr::from_str("0.0.0.0:8080").unwrap();
-    config.local_api_key = Some("shared-secret".to_string());
+    config.backend_api_key = Some("shared-secret".to_string());
     assert!(config.validate().is_ok());
 }
 
@@ -249,13 +239,13 @@ fn test_diff_classifies_live_and_restart_fields() {
     let mut new = Config::default();
     new.hidden_workshop_ids = vec![1];
     new.sync_interval_secs = 120;
-    new.local_api_key = Some("rotated-key".to_string());
+    new.backend_api_key = Some("rotated-key".to_string());
     new.local_api_bind = SocketAddr::from_str("127.0.0.1:9090").unwrap();
 
     let change = old.diff(&new);
     assert!(change.live_applied.contains(&"hidden_workshop_ids"));
     assert!(change.live_applied.contains(&"sync_interval_secs"));
-    assert!(change.live_applied.contains(&"local_api_key"));
+    assert!(change.live_applied.contains(&"backend_api_key"));
     assert!(change.requires_restart.contains(&"local_api_bind"));
     assert!(!change.unchanged);
 }

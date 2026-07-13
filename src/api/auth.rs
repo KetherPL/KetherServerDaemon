@@ -20,7 +20,7 @@ pub async fn require_api_key(
 ) -> Response {
     let config = read_config(&handlers.config);
     let Some(expected) = config
-        .local_api_key
+        .backend_api_key
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty())

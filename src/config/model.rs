@@ -22,10 +22,6 @@ pub struct Config {
     /// Local API bind address (e.g., "127.0.0.1:8080")
     pub local_api_bind: SocketAddr,
 
-    /// Optional bearer token required by local API routes
-    #[serde(default)]
-    pub local_api_key: Option<String>,
-
     /// Backend sync interval in seconds
     pub sync_interval_secs: u64,
 
@@ -81,7 +77,6 @@ impl Default for Config {
             backend_api_url: String::from("http://127.0.0.1:3001/api"),
             backend_api_key: None,
             local_api_bind: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
-            local_api_key: None,
             sync_interval_secs: 300, // 5 minutes
             log_level: String::from("info"),
             max_download_size_bytes: default_max_download_size(),
@@ -113,14 +108,12 @@ registry_path = "{}"
 # Website-server registry sync API (port 3001)
 backend_api_url = "{}"
 
-# Bearer token for backend sync (must match website-server [server_daemon].sync_api_key)
+# Shared bearer token for backend sync and inbound API requests
+# (must match website-server [server_daemon].sync_api_key)
 # backend_api_key = "your-shared-secret"
 
-# Local HTTP API bind address. A non-loopback address requires local_api_key.
+# Local HTTP API bind address. A non-loopback address requires backend_api_key.
 local_api_bind = "{}"
-
-# Bearer token for inbound local API requests
-# local_api_key = "your-shared-secret"
 
 # Backend sync interval in seconds
 sync_interval_secs = {}

@@ -30,12 +30,12 @@ impl Config {
 
         if !self.local_api_bind.ip().is_loopback()
             && self
-                .local_api_key
+                .backend_api_key
                 .as_deref()
                 .is_none_or(|key| key.trim().is_empty())
         {
             anyhow::bail!(
-                "local_api_key must be configured when local_api_bind ({}) is not loopback",
+                "backend_api_key must be configured when local_api_bind ({}) is not loopback",
                 self.local_api_bind
             );
         }
