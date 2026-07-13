@@ -973,6 +973,11 @@ impl MapInstallationService {
         }
     }
 
+    /// Check the cached Steam transport and evict it when disconnected.
+    pub async fn steam_health_check(&self) {
+        self.workshop_downloader.health_check().await;
+    }
+
     /// Get reference to registry (for sync task)
     pub fn registry(&self) -> &Arc<dyn Registry> {
         &self.registry

@@ -17,6 +17,9 @@ use tracing::{info, warn};
 /// steam-vent defaults to 10s; UFS download-URL jobs often need longer.
 const STEAM_JOB_TIMEOUT: Duration = Duration::from_secs(60);
 const STEAM_DOWNLOAD_URL_RETRIES: u32 = 3;
+const STEAM_CONNECT_RETRY_LIMIT: u32 = 3;
+const STEAM_CONNECT_BACKOFF_BASE_SECS: u64 = 1;
+const STEAM_CONNECT_BACKOFF_MAX_SECS: u64 = 30;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SteamError {
@@ -40,8 +43,18 @@ pub enum SteamError {
 }
 
 impl SteamError {
-    pub fn is_timeout(&self) -> bool {
-        is_steam_timeout(self)
+    pub fn is_connection_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Connection(_)
+                | Self::Network(
+                    steam_vent::NetworkError::Ws(_)
+                        | steam_vent::NetworkError::IO(_)
+                        | steam_vent::NetworkError::EOF
+                        | steam_vent::NetworkError::Timeout
+                        | steam_vent::NetworkError::CryptoHandshakeFailed
+                )
+        )
     }
 }
 
@@ -96,6 +109,31 @@ impl SteamConnection {
         connection.set_timeout(STEAM_JOB_TIMEOUT);
         
         Ok(Self { connection })
+    }
+
+    /// Establish a Steam connection, retrying transient discovery and handshake failures.
+    pub async fn connect_with_retry() -> Result<Self, SteamError> {
+        for attempt in 1..=STEAM_CONNECT_RETRY_LIMIT {
+            match Self::new().await {
+                Ok(connection) => return Ok(connection),
+                Err(error) if attempt < STEAM_CONNECT_RETRY_LIMIT => {
+                    let exponential_delay =
+                        STEAM_CONNECT_BACKOFF_BASE_SECS * (1_u64 << (attempt - 1));
+                    let delay_secs = exponential_delay.min(STEAM_CONNECT_BACKOFF_MAX_SECS);
+                    warn!(
+                        error = %error,
+                        attempt,
+                        max_attempts = STEAM_CONNECT_RETRY_LIMIT,
+                        delay_secs,
+                        "Failed to establish Steam connection, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        unreachable!("Steam connection retry loop always returns")
     }
 
     /// Batch-fetch workshop file metadata from Steam.
@@ -196,5 +234,51 @@ impl SteamConnection {
     /// Get connection reference for reuse
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn connection_errors_are_recoverable() {
+        let errors = [
+            SteamError::Connection(steam_vent::ConnectionError::Aborted),
+            SteamError::Network(steam_vent::NetworkError::Ws(
+                tokio_tungstenite::tungstenite::Error::AlreadyClosed,
+            )),
+            SteamError::Network(steam_vent::NetworkError::IO(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "connection reset",
+            ))),
+            SteamError::Network(steam_vent::NetworkError::EOF),
+            SteamError::Network(steam_vent::NetworkError::Timeout),
+            SteamError::Network(steam_vent::NetworkError::CryptoHandshakeFailed),
+        ];
+
+        for error in errors {
+            assert!(
+                error.is_connection_error(),
+                "expected a recoverable connection error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn application_and_protocol_errors_are_not_connection_errors() {
+        let errors = [
+            SteamError::Network(steam_vent::NetworkError::InvalidHeader),
+            SteamError::DownloadUrlFailed(2),
+            SteamError::NoDownloadUrl,
+        ];
+
+        for error in errors {
+            assert!(
+                !error.is_connection_error(),
+                "expected a non-connection error: {error}"
+            );
+        }
     }
 }

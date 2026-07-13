@@ -34,6 +34,8 @@ use map_installer::{is_watched_map_path, MapInstallationService};
 use maps_denylist::Mapsdenylist;
 use repl::{DaemonCommand, start_key_listener};
 
+const STEAM_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 fn read_denylist(handle: &config::ConfigHandle) -> Mapsdenylist {
     Mapsdenylist::from_config(&read_config(handle))
 }
@@ -294,6 +296,17 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    let installer_steam_health = Arc::clone(&installer);
+    let steam_health_task = tokio::spawn(async move {
+        info!("Steam connection health-check task started");
+        let mut interval = tokio::time::interval(STEAM_HEALTH_CHECK_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            installer_steam_health.steam_health_check().await;
+        }
+    });
     
     // Start HTTP server
     let registry_http = Arc::clone(&registry);
@@ -348,6 +361,7 @@ async fn main() -> anyhow::Result<()> {
     
     watcher_task.abort();
     sync_task.abort();
+    steam_health_task.abort();
     http_task.abort();
     repl_task.abort();
     

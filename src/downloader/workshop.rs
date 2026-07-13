@@ -1,19 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 use crate::downloader::{
     client::HttpClient,
-    steam::{SteamConnection, WorkshopFileDetails},
+    steam::{SteamConnection, SteamError, WorkshopFileDetails},
     traits::Downloader,
 };
 
 const STEAM_PUBLISHED_FILE_DETAILS_URL: &str =
     "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
+const STEAM_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct WorkshopDownloader {
     client: HttpClient,
@@ -47,7 +50,7 @@ impl WorkshopDownloader {
     }
 
     async fn connect_steam(&self) -> anyhow::Result<SteamConnection> {
-        SteamConnection::new()
+        SteamConnection::connect_with_retry()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to establish Steam connection: {}", e))
     }
@@ -63,10 +66,81 @@ impl WorkshopDownloader {
 
     async fn reset_steam_connection(&self) -> anyhow::Result<SteamConnection> {
         warn!("Resetting Steam connection after request failure");
-        let connection = self.connect_steam().await?;
         let mut guard = self.steam_connection.lock().await;
+        *guard = None;
+        let connection = self.connect_steam().await?;
         *guard = Some(connection.clone());
         Ok(connection)
+    }
+
+    async fn call_with_reconnect<T, F, Fut>(
+        &self,
+        operation_name: &'static str,
+        operation: F,
+    ) -> anyhow::Result<T>
+    where
+        F: Fn(SteamConnection) -> Fut,
+        Fut: Future<Output = Result<T, SteamError>>,
+    {
+        let connection = self.get_steam_connection().await?;
+        match operation(connection).await {
+            Ok(value) => Ok(value),
+            Err(error) if error.is_connection_error() => {
+                warn!(
+                    error = %error,
+                    operation = operation_name,
+                    "Steam call failed due to a dead connection, reconnecting"
+                );
+                let connection = self.reset_steam_connection().await?;
+                match operation(connection).await {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        if error.is_connection_error() {
+                            self.steam_connection.lock().await.take();
+                        }
+                        Err(anyhow::anyhow!(
+                            "{operation_name} failed after reconnect: {error}"
+                        ))
+                    }
+                }
+            }
+            Err(error) => Err(anyhow::anyhow!("{operation_name} failed: {error}")),
+        }
+    }
+
+    /// Probe a cached Steam connection and evict it if its transport is dead.
+    pub async fn health_check(&self) {
+        let mut guard = self.steam_connection.lock().await;
+        let Some(connection) = guard.as_ref().cloned() else {
+            return;
+        };
+
+        let result = tokio::time::timeout(
+            STEAM_HEALTH_CHECK_TIMEOUT,
+            connection.get_workshop_file_details(&[0]),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(_)) => debug!("Steam connection health check succeeded"),
+            Ok(Err(error)) if error.is_connection_error() => {
+                warn!(error = %error, "Steam connection health check failed; evicting connection");
+                guard.take();
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = STEAM_HEALTH_CHECK_TIMEOUT.as_secs(),
+                    "Steam connection health check timed out; evicting connection"
+                );
+                guard.take();
+            }
+            Ok(Err(error)) => {
+                debug!(
+                    error = %error,
+                    "Steam health probe returned an application error; connection remains usable"
+                );
+            }
+        }
     }
     
     async fn download_workshop_item(&self, workshop_id: u64) -> anyhow::Result<PathBuf> {
@@ -132,19 +206,11 @@ impl WorkshopDownloader {
             "No direct file_url; falling back to Steam UFS hcontent lookup"
         );
 
-        let steam = self.get_steam_connection().await?;
-        match steam.get_download_url(detail.hcontent).await {
-            Ok(url) => Ok(Some(url)),
-            Err(error) if error.is_timeout() => {
-                self.reset_steam_connection()
-                    .await?
-                    .get_download_url(detail.hcontent)
-                    .await
-                    .map(Some)
-                    .map_err(|e| anyhow::anyhow!("Failed to get download URL: {}", e))
-            }
-            Err(error) => Err(anyhow::anyhow!("Failed to get download URL: {}", error)),
-        }
+        self.call_with_reconnect("Steam download URL request", |steam| async move {
+            steam.get_download_url(detail.hcontent).await
+        })
+        .await
+        .map(Some)
     }
 
     async fn fetch_file_url_via_web_api(
@@ -204,11 +270,13 @@ impl WorkshopDownloader {
         &self,
         workshop_ids: &[u64],
     ) -> anyhow::Result<Vec<WorkshopFileDetails>> {
-        let steam = self.get_steam_connection().await?;
-        steam
-            .get_workshop_file_details(workshop_ids)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get workshop file details: {}", e))
+        self.call_with_reconnect(
+            "Steam workshop metadata request",
+            |steam| async move {
+                steam.get_workshop_file_details(workshop_ids).await
+            },
+        )
+        .await
     }
 
     async fn download_from_url(

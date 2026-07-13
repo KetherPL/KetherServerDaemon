@@ -69,6 +69,7 @@ steam-vent-proto-steam = "0.5.2"
 [dev-dependencies]
 crc = "3"
 serial_test = "3"
+tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }
 
 # The default release profile. It contains all optimizations, without
