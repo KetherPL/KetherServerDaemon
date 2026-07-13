@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::api::error::ApiError;
 use crate::api::handlers::ApiHandlers;
 use crate::api::response::ApiResponse;
+use crate::api::auth::require_api_key;
 use crate::api::types::{
     DiscoverRequest, InstallL4d2CenterRequest, InstallMapRequest, ModifyMapRequest,
     UpdateL4d2CenterRequest, UpdateWorkshopRequest,
@@ -96,10 +97,10 @@ pub async fn modify_map_handler(
 }
 
 pub fn routes(handlers: Arc<ApiHandlers>) -> Router {
+    use axum::middleware;
     use axum::routing::{get, post};
 
-    Router::new()
-        .route("/health", get(health_handler))
+    let protected = Router::new()
         .route("/api/maps/install", post(install_map_handler))
         .route("/api/maps/uninstall/{id}", post(uninstall_map_handler))
         .route("/api/maps/workshop/update", post(update_workshop_handler))
@@ -113,5 +114,14 @@ pub fn routes(handlers: Arc<ApiHandlers>) -> Router {
             "/api/maps/{id}",
             get(get_map_handler).patch(modify_map_handler),
         )
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&handlers),
+            require_api_key,
+        ))
+        .with_state(Arc::clone(&handlers));
+
+    Router::new()
+        .route("/health", get(health_handler))
+        .merge(protected)
         .with_state(handlers)
 }

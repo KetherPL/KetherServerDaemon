@@ -49,7 +49,8 @@ impl HttpServer {
 mod tests {
     use super::*;
     use crate::api::response::ApiResponse;
-    use crate::api::test_support::setup_api_router;
+    use crate::api::test_support::{setup_api_router, setup_api_router_with_config};
+    use crate::config::{read_config, Config};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -62,6 +63,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint_does_not_require_api_key() {
+        let mut config = Config::default();
+        config.local_api_key = Some("secret".to_string());
+        let (app, _handle, _dirs) = setup_api_router_with_config(config).await;
+        let response = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_api_rejects_missing_or_wrong_bearer_token() {
+        for authorization in [None, Some("Bearer wrong")] {
+            let mut config = Config::default();
+            config.local_api_key = Some("secret".to_string());
+            let (app, _handle, _dirs) = setup_api_router_with_config(config).await;
+            let mut request = Request::get("/api/maps");
+            if let Some(value) = authorization {
+                request = request.header("authorization", value);
+            }
+            let response = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_api_accepts_correct_bearer_token() {
+        let mut config = Config::default();
+        config.local_api_key = Some("secret".to_string());
+        let (app, _handle, _dirs) = setup_api_router_with_config(config).await;
+        let response = app
+            .oneshot(
+                Request::get("/api/maps")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_api_uses_hot_reloaded_bearer_token() {
+        let mut config = Config::default();
+        config.local_api_key = Some("old-secret".to_string());
+        let (app, handle, _dirs) = setup_api_router_with_config(config).await;
+
+        let mut reloaded = (*read_config(&handle)).clone();
+        reloaded.local_api_key = Some("new-secret".to_string());
+        *handle.write().unwrap() = Arc::new(reloaded);
+
+        let old_response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/maps")
+                    .header("authorization", "Bearer old-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(old_response.status(), StatusCode::UNAUTHORIZED);
+
+        let new_response = app
+            .oneshot(
+                Request::get("/api/maps")
+                    .header("authorization", "Bearer new-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(new_response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

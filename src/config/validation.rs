@@ -28,10 +28,15 @@ impl Config {
         crate::utils::validate_url(&self.l4d2center_index_url)
             .map_err(|e| anyhow::anyhow!("Invalid l4d2center_index_url: {e}"))?;
 
-        if !self.local_api_bind.ip().is_loopback() {
-            tracing::warn!(
-                addr = %self.local_api_bind,
-                "local_api_bind is not loopback; the HTTP API will be reachable on the network without authentication"
+        if !self.local_api_bind.ip().is_loopback()
+            && self
+                .local_api_key
+                .as_deref()
+                .is_none_or(|key| key.trim().is_empty())
+        {
+            anyhow::bail!(
+                "local_api_key must be configured when local_api_bind ({}) is not loopback",
+                self.local_api_bind
             );
         }
 

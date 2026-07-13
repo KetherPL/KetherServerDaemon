@@ -23,6 +23,7 @@ pub fn clear_kether_env_vars() {
     remove_env_var(keys::BACKEND_API_URL);
     remove_env_var(keys::BACKEND_API_KEY);
     remove_env_var(keys::LOCAL_API_BIND);
+    remove_env_var(keys::LOCAL_API_KEY);
     remove_env_var(keys::SYNC_INTERVAL_SECS);
     remove_env_var(keys::LOG_LEVEL);
     remove_env_var(keys::MAX_DOWNLOAD_SIZE_BYTES);

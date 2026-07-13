@@ -27,6 +27,7 @@ Configuration is loaded from `config.toml` (or path in `KETHER_CONFIG`). If the 
 | `KETHER_BACKEND_API_URL` | Remote sync API base URL (website-server: `http://127.0.0.1:3001/api`) |
 | `KETHER_BACKEND_API_KEY` | Bearer token for backend API (must match website-server `[server_daemon].sync_api_key`) |
 | `KETHER_LOCAL_API_BIND` | Local HTTP API bind address (default `127.0.0.1:8080`) |
+| `KETHER_LOCAL_API_KEY` | Bearer token for inbound local API requests; required for non-loopback binds |
 | `KETHER_SYNC_INTERVAL_SECS` | Backend sync interval |
 | `KETHER_LOG_LEVEL` | `trace`, `debug`, `info`, `warn`, `error` |
 | `KETHER_MAX_DOWNLOAD_SIZE_BYTES` | Max download size (default 1GB) |
@@ -50,6 +51,10 @@ Configuration is loaded from `config.toml` (or path in `KETHER_CONFIG`). If the 
 ## HTTP API
 
 Default bind: `http://127.0.0.1:8080`
+
+All `/api/*` routes require `Authorization: Bearer <local_api_key>` when
+`local_api_key` is configured. `/health` remains unauthenticated. A non-loopback
+`local_api_bind` is rejected at startup unless this key is set.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -82,6 +87,22 @@ backend_api_key = "your-shared-secret"
 ```
 
 The public website reads installed maps from `GET http://127.0.0.1:3001/api/maps` (no auth).
+
+### Cross-host website-server access
+
+When website-server runs on another host, bind the daemon to an address reachable
+from that host and configure a shared inbound API key:
+
+```toml
+local_api_bind = "0.0.0.0:8080"
+local_api_key = "a-long-random-secret"
+```
+
+Set the same value as website-server's `[server_daemon].daemon_api_key`, and set
+its `daemon_url` to this daemon's reachable HTTP address. The daemon API is plain
+HTTP, so firewall port 8080 to the website-server's source IP only. Prefer a
+private VPN/tunnel or a TLS reverse proxy for traffic crossing an untrusted
+network.
 
 ## Systemd
 

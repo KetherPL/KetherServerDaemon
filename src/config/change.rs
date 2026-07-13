@@ -52,6 +52,9 @@ impl Config {
         if self.backend_api_key != new.backend_api_key {
             change.live_applied.push("backend_api_key");
         }
+        if self.local_api_key != new.local_api_key {
+            change.live_applied.push("local_api_key");
+        }
 
         if self.l4d2_server_dir != new.l4d2_server_dir {
             change.requires_restart.push("l4d2_server_dir");

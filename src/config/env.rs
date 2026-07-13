@@ -12,6 +12,7 @@ pub mod keys {
     pub const BACKEND_API_URL: &str = "KETHER_BACKEND_API_URL";
     pub const BACKEND_API_KEY: &str = "KETHER_BACKEND_API_KEY";
     pub const LOCAL_API_BIND: &str = "KETHER_LOCAL_API_BIND";
+    pub const LOCAL_API_KEY: &str = "KETHER_LOCAL_API_KEY";
     pub const SYNC_INTERVAL_SECS: &str = "KETHER_SYNC_INTERVAL_SECS";
     pub const LOG_LEVEL: &str = "KETHER_LOG_LEVEL";
     pub const MAX_DOWNLOAD_SIZE_BYTES: &str = "KETHER_MAX_DOWNLOAD_SIZE_BYTES";
@@ -36,6 +37,9 @@ pub fn apply_env_overrides(config: &mut Config) -> anyhow::Result<()> {
     }
     if let Ok(val) = std::env::var(keys::LOCAL_API_BIND) {
         config.local_api_bind = SocketAddr::from_str(&val)?;
+    }
+    if let Ok(val) = std::env::var(keys::LOCAL_API_KEY) {
+        config.local_api_key = Some(val);
     }
     if let Ok(val) = std::env::var(keys::SYNC_INTERVAL_SECS) {
         config.sync_interval_secs = val.parse()?;
