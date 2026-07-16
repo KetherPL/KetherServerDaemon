@@ -1,29 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use url::Url;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use anyhow::{Result, Context};
 
 /// Maximum allowed URL length
 const MAX_URL_LENGTH: usize = 2048;
 
 /// Validate a URL to prevent SSRF (Server-Side Request Forgery) attacks
-/// 
+///
 /// Checks:
 /// - Only allows http/https schemes
-/// - Rejects private/internal IP addresses
+/// - Rejects private/internal IP addresses (literal)
 /// - Rejects localhost
 /// - Validates URL length
 pub fn validate_url(url_str: &str) -> Result<()> {
-    // Check URL length
     if url_str.len() > MAX_URL_LENGTH {
         return Err(anyhow::anyhow!("URL exceeds maximum length of {} characters", MAX_URL_LENGTH));
     }
-    
-    // Parse URL
+
     let url = Url::parse(url_str)
         .context("Invalid URL format")?;
-    
-    // Check scheme - only allow http and https
+
     match url.scheme() {
         "http" | "https" => {}
         scheme => {
@@ -33,27 +30,64 @@ pub fn validate_url(url_str: &str) -> Result<()> {
             ));
         }
     }
-    
-    // Check host
+
     if let Some(host) = url.host_str() {
-        // Check for localhost variants
         if is_localhost(host) {
             return Err(anyhow::anyhow!(
                 "URL host is localhost (not allowed for security reasons)"
             ));
         }
-        
-        // Try to parse as IP address
+
         if let Ok(ip) = host.parse::<IpAddr>()
-            && is_private_ip(&ip) {
-                return Err(anyhow::anyhow!(
-                    "URL contains private/internal IP address (not allowed for security reasons)"
-                ));
-            }
+            && is_private_ip(&ip)
+        {
+            return Err(anyhow::anyhow!(
+                "URL contains private/internal IP address (not allowed for security reasons)"
+            ));
+        }
     } else {
         return Err(anyhow::anyhow!("URL must have a host"));
     }
-    
+
+    Ok(())
+}
+
+/// Validate URL and reject hosts whose DNS resolution yields private/link-local addresses.
+pub async fn validate_url_resolved(url_str: &str) -> Result<()> {
+    validate_url(url_str)?;
+
+    let url = Url::parse(url_str).context("Invalid URL format")?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("URL must have a host"))?;
+
+    // Literal IPs were already checked by validate_url.
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!("URL is missing a resolvable port"))?;
+
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("Failed to resolve host '{host}'"))?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(anyhow::anyhow!("Host '{host}' resolved to no addresses"));
+    }
+
+    for addr in addrs {
+        let ip = addr.ip();
+        if is_private_ip(&ip) || is_localhost(&ip.to_string()) {
+            return Err(anyhow::anyhow!(
+                "URL host '{host}' resolves to private/internal address {ip} (not allowed)"
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -72,7 +106,7 @@ fn is_localhost(host: &str) -> bool {
 }
 
 /// Check if an IP address is private/internal
-fn is_private_ip(ip: &IpAddr) -> bool {
+pub(crate) fn is_private_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => is_private_ipv4(ipv4),
         IpAddr::V6(ipv6) => is_private_ipv6(ipv6),
@@ -82,49 +116,49 @@ fn is_private_ip(ip: &IpAddr) -> bool {
 /// Check if an IPv4 address is private/internal
 fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
     let octets = ip.octets();
-    
+
     // Private ranges:
     // 10.0.0.0/8
     // 172.16.0.0/12
     // 192.168.0.0/16
     // 169.254.0.0/16 (link-local)
     // 127.0.0.0/8 (loopback)
-    
+    // 0.0.0.0/8
+
     octets[0] == 10
         || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
         || (octets[0] == 192 && octets[1] == 168)
         || (octets[0] == 169 && octets[1] == 254)
         || octets[0] == 127
+        || octets[0] == 0
 }
 
 /// Check if an IPv6 address is private/internal
 fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
     let segments = ip.segments();
-    
-    // Private ranges:
-    // ::1 (loopback)
-    // fc00::/7 (unique local)
-    // fe80::/10 (link-local)
-    // ::ffff:0:0/96 (IPv4-mapped)
-    
+
     if segments == [0, 0, 0, 0, 0, 0, 0, 1] {
         return true; // ::1
     }
-    
-    // Check for unique local (fc00::/7)
+
+    // Unique local (fc00::/7)
     if (segments[0] & 0xfe00) == 0xfc00 {
         return true;
     }
-    
-    // Check for link-local (fe80::/10)
+
+    // Link-local (fe80::/10)
     if (segments[0] & 0xffc0) == 0xfe80 {
         return true;
     }
-    
-    // Check for IPv4-mapped (::ffff:0:0/96)
-    if segments[0] == 0 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0
-        && segments[4] == 0 && segments[5] == 0xffff {
-        // Extract IPv4 and check if it's private
+
+    // IPv4-mapped (::ffff:0:0/96)
+    if segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0xffff
+    {
         let ipv4 = Ipv4Addr::new(
             ((segments[6] >> 8) & 0xff) as u8,
             (segments[6] & 0xff) as u8,
@@ -133,7 +167,7 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
         );
         return is_private_ipv4(&ipv4);
     }
-    
+
     false
 }
 
@@ -210,5 +244,16 @@ mod tests {
         assert!(is_private_ipv4(&Ipv4Addr::new(127, 0, 0, 1)));
         assert!(!is_private_ipv4(&Ipv4Addr::new(8, 8, 8, 8)));
     }
-}
 
+    #[tokio::test]
+    async fn validate_url_resolved_rejects_localhost_hostname() {
+        let result = validate_url_resolved("http://localhost/file.zip").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_url_resolved_rejects_private_literal() {
+        let result = validate_url_resolved("http://192.168.1.10/file.zip").await;
+        assert!(result.is_err());
+    }
+}

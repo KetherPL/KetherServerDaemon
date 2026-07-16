@@ -51,3 +51,13 @@ pub fn classify_modify_error(err: anyhow::Error) -> ApiError {
     error!(error = %message, "Failed to modify map");
     ApiError::internal(err.to_string())
 }
+
+pub fn classify_uninstall_error(err: anyhow::Error) -> ApiError {
+    let message = err.to_string();
+    if message.contains("not found") {
+        error!(error = %message, "Map not found for uninstall");
+        return ApiError::not_found(message);
+    }
+    error!(error = %message, "Failed to uninstall map");
+    ApiError::internal(message)
+}

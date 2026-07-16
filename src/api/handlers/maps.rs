@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::api::error::ApiError;
 use crate::api::response::ApiResponse;
-use crate::api::service_error::classify_modify_error;
+use crate::api::service_error::{classify_modify_error, classify_uninstall_error};
 use crate::api::types::{InstallMapRequest, ModifyMapRequest};
 use crate::api::validation::{parse_map_id, validate_install_request, validate_modify_request, InstallSource};
 use crate::registry::MapEntry;
@@ -30,7 +30,12 @@ impl ApiHandlers {
         let map_id = parse_map_id(&id)?;
 
         match self.registry.get_map(map_id).await {
-            Ok(Some(map)) => Ok(ok_json(map)),
+            Ok(Some(map)) => {
+                if self.denylist().is_hidden(&map) {
+                    return Err(ApiError::not_found(format!("Map #{map_id} not found")));
+                }
+                Ok(ok_json(map))
+            }
             Ok(None) => Err(ApiError::not_found(format!("Map #{map_id} not found"))),
             Err(e) => Err(registry_internal_err(e, "Failed to get map")),
         }
@@ -85,7 +90,7 @@ impl ApiHandlers {
                 info!(map_id = map_id, "Map uninstalled");
                 Ok(ok_json(()))
             }
-            Err(e) => Err(installer_internal_err(e, "Failed to uninstall map")),
+            Err(e) => Err(classify_uninstall_error(e)),
         }
     }
 
@@ -96,6 +101,12 @@ impl ApiHandlers {
     ) -> Result<Json<ApiResponse<MapEntry>>, ApiError> {
         let map_id = parse_map_id(&id)?;
         validate_modify_request(&request)?;
+
+        if let Ok(Some(map)) = self.registry.get_map(map_id).await
+            && self.denylist().is_hidden(&map)
+        {
+            return Err(ApiError::not_found(format!("Map #{map_id} not found")));
+        }
 
         info!(map_id, field = %request.field, "Modify map request received");
 

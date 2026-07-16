@@ -215,6 +215,11 @@ async fn main() -> anyhow::Result<()> {
         info!("Sync task started");
         let mut interval_secs = read_config(&sync_config_handle).sync_interval_secs;
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        // Per-update exponential backoff for repeatedly failing backend actions.
+        let mut failure_backoff: HashMap<String, (u32, Instant)> = HashMap::new();
+
         loop {
             interval.tick().await;
 
@@ -223,56 +228,85 @@ async fn main() -> anyhow::Result<()> {
                 interval_secs = current_config.sync_interval_secs;
                 interval =
                     tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             }
-            
+
             // Fetch updates from backend
             match sync_service_clone.fetch_updates().await {
                 Ok(updates) => {
+                    let now = Instant::now();
                     for update in updates {
-                        match update.action.as_str() {
+                        let update_key = format!("{}:{}", update.action, update.map_id);
+                        if let Some((_, retry_after)) = failure_backoff.get(&update_key)
+                            && *retry_after > now
+                        {
+                            debug!(
+                                map_id = %update.map_id,
+                                action = %update.action,
+                                "Skipping backend update due to backoff"
+                            );
+                            continue;
+                        }
+
+                        let result = match update.action.as_str() {
                             "install" => {
                                 info!(map_id = %update.map_id, "Backend requested map installation");
                                 if let Some(ref map_entry) = update.map_entry {
-                                    // Check if we have a workshop ID first
                                     if let Some(workshop_id) = map_entry.workshop_id {
-                                        // Install from workshop ID
-                                        if let Err(e) = installer_sync
+                                        installer_sync
                                             .install_from_workshop_id(workshop_id, None)
                                             .await
-                                        {
-                                            error!(error = %e, map_id = %update.map_id, workshop_id, "Failed to install workshop map");
-                                        }
+                                            .map(|_| ())
                                     } else {
-                                        // Install from URL
-                                        if let Err(e) = installer_sync
+                                        installer_sync
                                             .install_from_url(
                                                 map_entry.source_url.clone(),
                                                 Some(map_entry.name.clone()),
                                             )
                                             .await
-                                        {
-                                            error!(error = %e, map_id = %update.map_id, "Failed to install map from backend");
-                                        }
+                                            .map(|_| ())
                                     }
                                 } else {
                                     warn!(map_id = %update.map_id, "Backend update missing installation details");
+                                    Ok(())
                                 }
                             }
                             "uninstall" => {
                                 info!(map_id = %update.map_id, "Backend requested map uninstallation");
                                 match update.map_id.parse::<u64>() {
-                                    Ok(map_id) => {
-                                        if let Err(e) = installer_sync.uninstall_map(map_id).await {
-                                            error!(error = %e, map_id = %update.map_id, "Failed to uninstall map");
-                                        }
-                                    }
+                                    Ok(map_id) => match installer_sync.uninstall_map(map_id).await {
+                                        Ok(()) => Ok(()),
+                                        Err(e) if e.to_string().contains("not found") => Ok(()),
+                                        Err(e) => Err(e),
+                                    },
                                     Err(e) => {
                                         error!(error = %e, map_id = %update.map_id, "Invalid map ID format from backend");
+                                        Ok(())
                                     }
                                 }
                             }
                             _ => {
                                 warn!(action = %update.action, "Unknown sync action");
+                                Ok(())
+                            }
+                        };
+
+                        match result {
+                            Ok(()) => {
+                                failure_backoff.remove(&update_key);
+                            }
+                            Err(e) => {
+                                error!(error = %e, map_id = %update.map_id, action = %update.action, "Failed to apply backend update");
+                                let failures = failure_backoff
+                                    .get(&update_key)
+                                    .map(|(count, _)| *count)
+                                    .unwrap_or(0)
+                                    .saturating_add(1);
+                                let delay_secs = 2_u64.saturating_pow(failures.min(6));
+                                failure_backoff.insert(
+                                    update_key,
+                                    (failures, Instant::now() + Duration::from_secs(delay_secs)),
+                                );
                             }
                         }
                     }
@@ -281,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
                     error!(error = %e, "Failed to fetch updates from backend");
                 }
             }
-            
+
             // Push local state to backend
             match installer_sync.registry().list_maps().await {
                 Ok(maps) => {

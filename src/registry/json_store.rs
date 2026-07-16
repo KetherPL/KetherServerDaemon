@@ -233,18 +233,18 @@ impl Registry for JsonRegistry {
     }
 
     async fn list_maps(&self) -> anyhow::Result<Vec<MapEntry>> {
-        let state = self
-            .inner
-            .read()
-            .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+        let mut maps = {
+            let state = self
+                .inner
+                .read()
+                .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+            state
+                .iter()
+                .map(|(id, entry)| Self::map_entry_from_data(*id, entry))
+                .collect::<Vec<_>>()
+        };
 
-        let mut ids: Vec<u64> = state.keys().copied().collect();
-        ids.sort_unstable();
-        let maps = ids
-            .into_iter()
-            .filter_map(|id| state.get(&id).map(|entry| Self::map_entry_from_data(id, entry)))
-            .collect();
-
+        maps.sort_unstable_by_key(|entry| entry.id);
         Ok(maps)
     }
 

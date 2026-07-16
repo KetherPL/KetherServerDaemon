@@ -184,9 +184,19 @@ impl MapInstallationService {
 
         let (source_vpk, temp_cleanup) = self.prepare_vpk_from_download(downloaded).await?;
 
-        tokio::fs::copy(&source_vpk, &install_path)
-            .await
-            .context("Failed to replace installed map file")?;
+        let backup_path = install_path.with_extension("vpk.bak");
+        let had_existing = install_path.exists();
+        if had_existing {
+            tokio::fs::copy(&install_path, &backup_path)
+                .await
+                .context("Failed to back up existing workshop map before update")?;
+        }
+
+        if let Err(error) = crate::utils::atomic_replace_file(&source_vpk, &install_path).await {
+            temp_cleanup.cleanup().await;
+            let _ = tokio::fs::remove_file(&backup_path).await;
+            return Err(error).context("Failed to replace installed map file");
+        }
         info!(
             map_id = existing.id,
             dest = %install_path.display(),
@@ -195,15 +205,24 @@ impl MapInstallationService {
 
         temp_cleanup.cleanup().await;
 
-        let metadata = self
+        let metadata = match self
             .vpk_extractor
             .extract_vpk_metadata(install_path.clone())
-            .await?;
+            .await
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                Self::restore_vpk_backup(&install_path, &backup_path, had_existing).await;
+                return Err(error);
+            }
+        };
         let checksum = crate::utils::calculate_file_md5(&install_path).await.ok();
         let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
         let installed_at = Self::file_modified_time(&install_path)
             .await
             .unwrap_or_else(chrono::Utc::now);
+
+        let _ = tokio::fs::remove_file(&backup_path).await;
 
         let mut updated = existing.clone();
         updated.version = Some(metadata.version);
@@ -335,14 +354,33 @@ impl DownloadTempCleanup {
         Self { paths: Vec::new() }
     }
 
-    pub(super) async fn cleanup(self) {
-        for path in self.paths {
-            if path.is_dir() {
-                if let Err(error) = tokio::fs::remove_dir_all(&path).await {
-                    warn!(path = %path.display(), error = %error, "Failed to clean up temp directory");
-                }
-            } else if let Err(error) = tokio::fs::remove_file(&path).await {
+    pub(super) async fn cleanup(mut self) {
+        let paths = std::mem::take(&mut self.paths);
+        for path in paths {
+            Self::remove_path(&path).await;
+        }
+    }
+
+    async fn remove_path(path: &PathBuf) {
+        if path.is_dir() {
+            if let Err(error) = tokio::fs::remove_dir_all(path).await {
+                warn!(path = %path.display(), error = %error, "Failed to clean up temp directory");
+            }
+        } else if path.exists() {
+            if let Err(error) = tokio::fs::remove_file(path).await {
                 warn!(path = %path.display(), error = %error, "Failed to clean up temp file");
+            }
+        }
+    }
+}
+
+impl Drop for DownloadTempCleanup {
+    fn drop(&mut self) {
+        for path in self.paths.drain(..) {
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else if path.exists() {
+                let _ = std::fs::remove_file(&path);
             }
         }
     }

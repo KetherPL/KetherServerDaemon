@@ -77,4 +77,16 @@ impl Config {
         change.unchanged = change.live_applied.is_empty() && change.requires_restart.is_empty();
         change
     }
+
+    /// Copy only hot-reloadable fields from `new`, keeping restart-required fields from `self`.
+    pub fn with_live_fields_from(&self, new: &Config) -> Config {
+        let mut merged = self.clone();
+        merged.hidden_workshop_ids = new.hidden_workshop_ids.clone();
+        merged.hidden_map_ids = new.hidden_map_ids.clone();
+        merged.sync_interval_secs = new.sync_interval_secs;
+        merged.l4d2center_index_url = new.l4d2center_index_url.clone();
+        merged.backend_api_url = new.backend_api_url.clone();
+        merged.backend_api_key = new.backend_api_key.clone();
+        merged
+    }
 }

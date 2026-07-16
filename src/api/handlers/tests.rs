@@ -455,3 +455,66 @@ async fn test_uninstall_map_invalid_id() {
         axum::http::StatusCode::BAD_REQUEST
     );
 }
+
+#[tokio::test]
+async fn test_uninstall_map_not_found() {
+    let (handlers, _registry, _dirs) = setup_api_fixture().await;
+
+    let result = handlers.uninstall_map(Path("99999".to_string())).await;
+    assert_eq!(
+        result.unwrap_err().status_code(),
+        axum::http::StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn test_get_map_hides_denylisted() {
+    use std::sync::Arc;
+
+    use crate::api::handlers::ApiHandlers;
+    use crate::config::init_handle;
+    use crate::map_installer::MapInstallationService;
+    use crate::registry::models::SourceKind;
+
+    let (registry, dirs) = crate::test_helpers::setup_test_dirs().await.unwrap();
+    let paths = dirs.service_paths();
+    let installer = Arc::new(
+        MapInstallationService::new(
+            Arc::clone(&registry),
+            paths.addons_dir,
+            paths.download_dir,
+            100 * 1024 * 1024,
+            1024 * 1024 * 1024,
+            10000,
+        )
+        .await
+        .unwrap(),
+    );
+
+    let hidden_id = registry
+        .add_map(MapEntry {
+            id: 0,
+            name: "Hidden".to_string(),
+            source_url: String::new(),
+            source_kind: SourceKind::Other,
+            workshop_id: None,
+            installed_path: "hidden.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
+            version: None,
+            checksum: None,
+            checksum_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let mut config = crate::config::Config::default();
+    config.hidden_map_ids = vec![hidden_id];
+    let handlers = ApiHandlers::new(registry, installer, init_handle(config));
+
+    let result = handlers.get_map(Path(hidden_id.to_string())).await;
+    assert_eq!(
+        result.unwrap_err().status_code(),
+        axum::http::StatusCode::NOT_FOUND
+    );
+}

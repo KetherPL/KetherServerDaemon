@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use anyhow::Context;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tracing::{info, warn};
 
 use crate::map_installer::helpers::{source_kind_from_url, workshop_source_url};
@@ -26,6 +26,8 @@ pub struct MapInstallationService {
     addons_dir: PathBuf,
     temp_dir: PathBuf,
     op_lock: Mutex<()>,
+    /// Caps concurrent heavy download/install work before op_lock is taken.
+    download_semaphore: Semaphore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +130,7 @@ impl MapInstallationService {
             addons_dir,
             temp_dir,
             op_lock: Mutex::new(()),
+            download_semaphore: Semaphore::new(2),
         })
     }
     
@@ -137,22 +140,33 @@ impl MapInstallationService {
         url: String,
         name: Option<String>,
     ) -> anyhow::Result<MapEntry> {
+        let _download_permit = self
+            .download_semaphore
+            .acquire()
+            .await
+            .expect("download semaphore closed");
         info!(url = %url, "Starting map installation from URL");
-        
+
         // Validate URL format - should be HTTP/HTTPS
-        crate::utils::validate_url(&url)
+        crate::utils::validate_url_resolved(&url)
+            .await
             .context("Invalid URL format (SSRF protection)")?;
-        
+
         // Install from ZIP URL (url parser no longer needed since workshop_id is separate)
         self.install_from_zip_url(&url, name).await
     }
-    
+
     /// Install a map from Steam Workshop ID
     pub async fn install_from_workshop_id(
         &self,
         workshop_id: u64,
         name: Option<String>,
     ) -> anyhow::Result<MapEntry> {
+        let _download_permit = self
+            .download_semaphore
+            .acquire()
+            .await
+            .expect("download semaphore closed");
         info!(workshop_id, "Installing map from Steam Workshop");
 
         if let Some(existing) = self.find_map_by_workshop_id(workshop_id).await? {
@@ -800,8 +814,7 @@ impl MapInstallationService {
         info!(map_id = map_id, "Uninstalling map");
 
         let Some(map_entry) = self.registry.get_map(map_id).await? else {
-            info!(map_id, "Map not found, nothing to uninstall");
-            return Ok(());
+            return Err(anyhow::anyhow!("Map #{map_id} not found"));
         };
 
         // Construct absolute path from relative path
@@ -811,8 +824,8 @@ impl MapInstallationService {
         crate::utils::validate_path_within_base_new(&installed_path_abs, &self.addons_dir)
             .context("Attempted to uninstall map outside of addons directory - potential path traversal detected!")?;
 
-        self.registry.remove_map(map_id).await?;
-
+        // Delete on disk first so a failed delete does not leave an orphan VPK
+        // after the registry entry is already gone.
         if installed_path_abs.exists() {
             let removal_result = if installed_path_abs.is_file() {
                 tokio::fs::remove_file(&installed_path_abs).await
@@ -822,19 +835,16 @@ impl MapInstallationService {
                 Ok(())
             };
 
-            match removal_result {
-                Ok(()) => {
-                    info!(path = %installed_path_abs.display(), "Removed map files");
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        path = %installed_path_abs.display(),
-                        "Registry entry removed but failed to delete map file"
-                    );
-                }
-            }
+            removal_result.with_context(|| {
+                format!(
+                    "Failed to delete map files at {}",
+                    installed_path_abs.display()
+                )
+            })?;
+            info!(path = %installed_path_abs.display(), "Removed map files");
         }
+
+        self.registry.remove_map(map_id).await?;
 
         info!(map_id = map_id, "Map uninstalled successfully");
         Ok(())
@@ -893,6 +903,25 @@ impl MapInstallationService {
         let metadata = tokio::fs::metadata(path).await.ok()?;
         let modified = metadata.modified().ok()?;
         Some(chrono::DateTime::<chrono::Utc>::from(modified))
+    }
+
+    pub(super) async fn restore_vpk_backup(
+        install_path: &Path,
+        backup_path: &Path,
+        had_existing: bool,
+    ) {
+        if had_existing && backup_path.exists() {
+            if let Err(error) = crate::utils::atomic_replace_file(backup_path, install_path).await {
+                warn!(
+                    path = %install_path.display(),
+                    error = %error,
+                    "Failed to restore VPK backup after failed update"
+                );
+            }
+        } else if !had_existing {
+            let _ = tokio::fs::remove_file(install_path).await;
+        }
+        let _ = tokio::fs::remove_file(backup_path).await;
     }
 
     pub(super) async fn build_map_entry_from_file(

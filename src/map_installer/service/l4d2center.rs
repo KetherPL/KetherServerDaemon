@@ -221,9 +221,19 @@ impl MapInstallationService {
 
         let (source_vpk, temp_cleanup) = self.prepare_vpk_from_download(downloaded).await?;
 
-        tokio::fs::copy(&source_vpk, &install_path)
-            .await
-            .context("Failed to replace installed L4D2Center map file")?;
+        let backup_path = install_path.with_extension("vpk.bak");
+        let had_existing = install_path.exists();
+        if had_existing {
+            tokio::fs::copy(&install_path, &backup_path)
+                .await
+                .context("Failed to back up existing L4D2Center map before update")?;
+        }
+
+        if let Err(error) = crate::utils::atomic_replace_file(&source_vpk, &install_path).await {
+            temp_cleanup.cleanup().await;
+            let _ = tokio::fs::remove_file(&backup_path).await;
+            return Err(error).context("Failed to replace installed L4D2Center map file");
+        }
         info!(
             map_id = existing.id,
             dest = %install_path.display(),
@@ -232,31 +242,35 @@ impl MapInstallationService {
 
         temp_cleanup.cleanup().await;
 
+        let checksum = match crate::utils::calculate_file_md5(&install_path).await {
+            Ok(value) => value,
+            Err(error) => {
+                Self::restore_vpk_backup(&install_path, &backup_path, had_existing).await;
+                return Err(error).context("Failed to checksum replaced L4D2Center map");
+            }
+        };
+
+        if !md5_matches(&checksum, expected_md5) {
+            Self::restore_vpk_backup(&install_path, &backup_path, had_existing).await;
+            return Err(anyhow::anyhow!(
+                "L4D2Center map MD5 mismatch after update (expected {expected_md5}, got {checksum})"
+            ));
+        }
+
+        let _ = tokio::fs::remove_file(&backup_path).await;
+
         let metadata = self
             .vpk_extractor
             .extract_vpk_metadata(install_path.clone())
             .await?;
-        let checksum = crate::utils::calculate_file_md5(&install_path).await.ok();
-        let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
         let installed_at = Self::file_modified_time(&install_path)
             .await
             .unwrap_or_else(chrono::Utc::now);
 
-        if let Some(actual) = checksum.as_deref()
-            && !md5_matches(actual, expected_md5)
-        {
-            warn!(
-                map_id = existing.id,
-                expected = expected_md5,
-                actual,
-                "Replaced L4D2Center map MD5 does not match catalog entry"
-            );
-        }
-
         let mut updated = existing.clone();
         updated.version = Some(metadata.version);
-        updated.checksum = checksum;
-        updated.checksum_kind = checksum_kind;
+        updated.checksum = Some(checksum);
+        updated.checksum_kind = Some("md5".to_string());
         updated.installed_at = installed_at;
         updated.source_kind = SourceKind::L4d2Center;
 
@@ -287,5 +301,14 @@ mod tests {
             "new",
             false
         ));
+    }
+
+    #[test]
+    fn md5_mismatch_is_detected_by_helper() {
+        assert!(!md5_matches(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ));
+        assert!(md5_matches("AbC", "abc"));
     }
 }

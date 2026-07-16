@@ -84,10 +84,37 @@ async fn setup_test_service() -> (MapInstallationService, Arc<dyn Registry>, tes
     #[tokio::test]
     async fn test_uninstall_map_not_exists() {
         let (service, _registry, _dirs) = setup_test_service().await;
-        
-        // Uninstall non-existent map should not error
+
         let result = service.uninstall_map(99999).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_uninstall_map_removes_file_before_registry() {
+        let (service, registry, dirs) = setup_test_service().await;
+        let vpk_path = dirs.addons_path().join("present.vpk");
+        tokio::fs::write(&vpk_path, b"vpk-bytes").await.unwrap();
+
+        let map_entry = MapEntry {
+            id: 0,
+            name: "Present".to_string(),
+            source_url: "https://example.com/map.zip".to_string(),
+            source_kind: SourceKind::Other,
+            workshop_id: None,
+            installed_path: "present.vpk".to_string(),
+            installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
+            version: None,
+            checksum: None,
+            checksum_kind: None,
+        };
+        let assigned_id = registry.add_map(map_entry).await.unwrap();
+
+        let result = service.uninstall_map(assigned_id).await;
         assert!(result.is_ok());
+        assert!(!vpk_path.exists());
+        assert!(registry.get_map(assigned_id).await.unwrap().is_none());
     }
 
     #[tokio::test]

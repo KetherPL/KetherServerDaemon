@@ -351,16 +351,33 @@ mod tests {
     async fn test_download_zip_delegation() {
         let http = acquire_http_test_lock().await;
         let temp_dir = TempDir::new().unwrap();
-        let downloader = WorkshopDownloader::new(temp_dir.path().to_path_buf(), 100 * 1024 * 1024).unwrap();
+        let zip_downloader = crate::downloader::zip::ZipDownloader::new_insecure_for_tests(
+            temp_dir.path().to_path_buf(),
+            100 * 1024 * 1024,
+        )
+        .await
+        .unwrap();
         let url = http.url("/workshop.zip");
 
-        let result = downloader.download_zip(&url).await;
+        let result = zip_downloader.download_zip(&url).await;
         assert!(result.is_ok());
         let downloaded_path = result.unwrap();
         assert!(downloaded_path.exists());
 
         let content = std::fs::read_to_string(&downloaded_path).unwrap();
         assert_eq!(content, "zip content");
+    }
+
+    #[tokio::test]
+    async fn download_zip_rejects_localhost_when_ssrf_enforced() {
+        let http = acquire_http_test_lock().await;
+        let temp_dir = TempDir::new().unwrap();
+        let downloader =
+            WorkshopDownloader::new(temp_dir.path().to_path_buf(), 100 * 1024 * 1024).unwrap();
+        let url = http.url("/workshop.zip");
+
+        let result = downloader.download_zip(&url).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

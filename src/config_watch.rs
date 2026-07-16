@@ -67,8 +67,8 @@ pub fn apply_reload(handle: &ConfigHandle, path: &Path) -> Result<ConfigChange, 
         Ok(mut guard) => {
             let previous = guard.clone();
             let change = previous.diff(&new_config);
-            if !change.unchanged {
-                *guard = Arc::new(new_config);
+            if !change.live_applied.is_empty() {
+                *guard = Arc::new(previous.with_live_fields_from(&new_config));
             }
             change
         }
@@ -76,8 +76,8 @@ pub fn apply_reload(handle: &ConfigHandle, path: &Path) -> Result<ConfigChange, 
             let mut guard = e.into_inner();
             let previous = guard.clone();
             let change = previous.diff(&new_config);
-            if !change.unchanged {
-                *guard = Arc::new(new_config);
+            if !change.live_applied.is_empty() {
+                *guard = Arc::new(previous.with_live_fields_from(&new_config));
             }
             change
         }
@@ -294,7 +294,11 @@ hidden_map_ids = []
 
         let new_snapshot = handle.read().expect("read lock").clone();
         assert_eq!(new_snapshot.sync_interval_secs, 600);
-        assert_eq!(new_snapshot.l4d2_server_dir, PathBuf::from("/other/path"));
+        // Restart-required fields must stay at the previously live values.
+        assert_eq!(
+            new_snapshot.l4d2_server_dir,
+            PathBuf::from("/home/steam/l4d2")
+        );
     }
 
     #[test]
