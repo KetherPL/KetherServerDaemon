@@ -30,7 +30,7 @@ impl HttpClient {
     fn build(max_download_size: u64, enforce_ssrf: bool) -> anyhow::Result<Self> {
         let client = Client::builder()
             .no_proxy()
-            .pool_max_idle_per_host(0)
+            .pool_max_idle_per_host(2)
             // Large workshop VPKs can take well over 5 minutes on typical links.
             .timeout(Duration::from_secs(3600))
             .read_timeout(Duration::from_secs(120))
@@ -69,8 +69,12 @@ impl HttpClient {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!(url = %url, attempt, error = %e, "Download attempt failed");
+                    let retryable = Self::is_retryable_error(&e);
+                    warn!(url = %url, attempt, error = %e, retryable, "Download attempt failed");
                     last_error = Some(e);
+                    if !retryable {
+                        break;
+                    }
                     if attempt < self.max_retries {
                         tokio::time::sleep(Duration::from_secs(2_u64.pow(attempt))).await;
                     }
@@ -90,51 +94,7 @@ impl HttpClient {
     ) -> anyhow::Result<()> {
         info!(url = %url, path = %output_path.display(), "Starting download");
 
-        let mut current_url = url.to_string();
-        let mut response = None;
-
-        for hop in 0..=MAX_REDIRECTS {
-            // Always re-validate redirect targets (DNS rebinding / private hop).
-            // Initial URL may skip checks only for insecure test clients.
-            if self.enforce_ssrf || hop > 0 {
-                validate_url_resolved(&current_url).await?;
-            }
-
-            let candidate = self.client.get(&current_url).send().await?;
-            let status = candidate.status();
-
-            if status.is_redirection() {
-                if hop == MAX_REDIRECTS {
-                    return Err(anyhow::anyhow!(
-                        "Too many redirects while downloading {url} (limit {MAX_REDIRECTS})"
-                    ));
-                }
-                let location = candidate
-                    .headers()
-                    .get(LOCATION)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Redirect response missing Location header")
-                    })?
-                    .to_str()
-                    .map_err(|_| anyhow::anyhow!("Redirect Location header is not valid UTF-8"))?;
-
-                let next = Url::parse(&current_url)
-                    .unwrap_or_else(|_| Url::parse("http://invalid.invalid").unwrap())
-                    .join(location)
-                    .map_err(|e| anyhow::anyhow!("Invalid redirect Location '{location}': {e}"))?;
-                current_url = next.to_string();
-                continue;
-            }
-
-            response = Some(candidate);
-            break;
-        }
-
-        let response = response.ok_or_else(|| anyhow::anyhow!("Download produced no response"))?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Err(anyhow::anyhow!("Download failed with status 404 Not Found"));
-        }
-        response.error_for_status_ref()?;
+        let response = self.send_validated(url).await?;
 
         if let Some(content_length) = response.content_length()
             && content_length > self.max_download_size
@@ -176,7 +136,14 @@ impl HttpClient {
                 ));
             }
 
-            file.write_all(&chunk).await?;
+            if let Err(error) = file.write_all(&chunk).await {
+                let _ = tokio::fs::remove_file(output_path).await;
+                return Err(anyhow::anyhow!(
+                    "Failed to write download after {} bytes: {}",
+                    downloaded,
+                    error
+                ));
+            }
         }
 
         file.flush().await?;
@@ -188,6 +155,100 @@ impl HttpClient {
 
         info!(url = %url, path = %output_path.display(), size = downloaded, "Download completed");
         Ok(())
+    }
+
+    /// GET with SSRF + redirect re-validation, returning response body as text.
+    pub async fn get_text(&self, url: &str) -> anyhow::Result<String> {
+        let response = self.send_validated(url).await?;
+        if let Some(content_length) = response.content_length()
+            && content_length > self.max_download_size
+        {
+            return Err(anyhow::anyhow!(
+                "Response size {} exceeds maximum {} bytes",
+                content_length,
+                self.max_download_size
+            ));
+        }
+
+        use futures_util::StreamExt;
+        let mut stream = response.bytes_stream();
+        let mut body = Vec::new();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            if body.len() as u64 + chunk.len() as u64 > self.max_download_size {
+                return Err(anyhow::anyhow!(
+                    "Response size exceeds maximum {} bytes",
+                    self.max_download_size
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        String::from_utf8(body).map_err(|e| anyhow::anyhow!("Response is not valid UTF-8: {e}"))
+    }
+
+    async fn send_validated(&self, url: &str) -> anyhow::Result<reqwest::Response> {
+        let mut current_url = url.to_string();
+
+        for hop in 0..=MAX_REDIRECTS {
+            if self.enforce_ssrf || hop > 0 {
+                validate_url_resolved(&current_url).await?;
+            }
+
+            let candidate = self.client.get(&current_url).send().await?;
+            let status = candidate.status();
+
+            if status.is_redirection() {
+                if hop == MAX_REDIRECTS {
+                    return Err(anyhow::anyhow!(
+                        "Too many redirects while requesting {url} (limit {MAX_REDIRECTS})"
+                    ));
+                }
+                let location = candidate
+                    .headers()
+                    .get(LOCATION)
+                    .ok_or_else(|| anyhow::anyhow!("Redirect response missing Location header"))?
+                    .to_str()
+                    .map_err(|_| anyhow::anyhow!("Redirect Location header is not valid UTF-8"))?;
+
+                let next = Url::parse(&current_url)
+                    .unwrap_or_else(|_| Url::parse("http://invalid.invalid").unwrap())
+                    .join(location)
+                    .map_err(|e| anyhow::anyhow!("Invalid redirect Location '{location}': {e}"))?;
+                current_url = next.to_string();
+                continue;
+            }
+
+            if status == StatusCode::NOT_FOUND {
+                return Err(anyhow::anyhow!("Request failed with status 404 Not Found"));
+            }
+            // Fail-fast on other client errors (do not retry as transient).
+            if status.is_client_error() {
+                return Err(anyhow::anyhow!(
+                    "Request failed with client error status {status}"
+                ));
+            }
+            candidate.error_for_status_ref()?;
+            return Ok(candidate);
+        }
+
+        Err(anyhow::anyhow!("Request produced no response"))
+    }
+
+    /// True when the error is worth retrying (transient network / server faults).
+    pub(crate) fn is_retryable_error(error: &anyhow::Error) -> bool {
+        let message = error.to_string();
+        if message.contains("404")
+            || message.contains("client error")
+            || message.contains("private")
+            || message.contains("localhost")
+            || message.contains("internal")
+            || message.contains("Invalid URL")
+            || message.contains("scheme")
+        {
+            return false;
+        }
+        true
     }
 
     pub fn client(&self) -> &Client {

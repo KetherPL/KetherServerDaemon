@@ -36,8 +36,62 @@ use repl::{DaemonCommand, start_key_listener};
 
 const STEAM_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+enum WatcherWork {
+    Sync {
+        path: PathBuf,
+        first_seen: Instant,
+        force_unstable: bool,
+    },
+    Remove {
+        path: PathBuf,
+    },
+}
+
 fn read_denylist(handle: &config::ConfigHandle) -> Mapsdenylist {
     Mapsdenylist::from_config(&read_config(handle))
+}
+
+async fn cleanup_download_temp_dir(temp_dir: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(temp_dir).await else {
+        return;
+    };
+    let mut removed = 0u32;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let result = if path.is_dir() {
+            tokio::fs::remove_dir_all(&path).await
+        } else {
+            tokio::fs::remove_file(&path).await
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(error) => warn!(
+                path = %path.display(),
+                error = %error,
+                "Failed to clean leftover download temp path"
+            ),
+        }
+    }
+    if removed > 0 {
+        info!(removed, "Cleaned leftover files from download temp directory");
+    }
+}
+
+fn registry_sync_fingerprint(maps: &[registry::MapEntry]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    for map in maps {
+        map.id.hash(&mut hasher);
+        map.name.hash(&mut hasher);
+        map.installed_path.hash(&mut hasher);
+        map.source_url.hash(&mut hasher);
+        map.checksum.hash(&mut hasher);
+        map.workshop_id.hash(&mut hasher);
+        map.installed_at.timestamp().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 #[tokio::main]
@@ -76,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
     // Create temp directory for downloads
     let temp_dir = std::env::temp_dir().join("kether-downloads");
     tokio::fs::create_dir_all(&temp_dir).await?;
+    cleanup_download_temp_dir(&temp_dir).await;
     
     // Initialize map installation service
     let installer = Arc::new(
@@ -94,8 +149,57 @@ async fn main() -> anyhow::Result<()> {
     let (daemon_tx, mut daemon_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
     
     // Spawn tasks
-    let installer_watcher = Arc::clone(&installer);
+    let installer_sync_worker = Arc::clone(&installer);
     let addons_dir_watcher = addons_dir.clone();
+    let (watcher_work_tx, mut watcher_work_rx) =
+        tokio::sync::mpsc::channel::<WatcherWork>(128);
+
+    let watcher_worker = tokio::spawn(async move {
+        info!("Watcher sync worker started");
+        while let Some(work) = watcher_work_rx.recv().await {
+            match work {
+                WatcherWork::Sync {
+                    path,
+                    first_seen,
+                    force_unstable,
+                } => {
+                    let pending_age_ms = Instant::now().duration_since(first_seen).as_millis();
+                    if !force_unstable {
+                        // Authoritative stability check lives in the worker so the
+                        // event loop never sleeps or awaits MD5/registry I/O.
+                        if !utils::file_is_stable(&path).await {
+                            debug!(
+                                path = %path.display(),
+                                pending_age_ms,
+                                "File unstable at worker handoff; syncing anyway after wait"
+                            );
+                        }
+                    } else {
+                        warn!(
+                            path = %path.display(),
+                            pending_age_ms,
+                            "File never stabilized, forcing sync attempt"
+                        );
+                    }
+                    if let Err(e) = installer_sync_worker.sync_map_from_path(path.clone()).await {
+                        warn!(
+                            error = %e,
+                            path = %path.display(),
+                            pending_age_ms,
+                            forced_unstable = force_unstable,
+                            "Failed to sync map from path"
+                        );
+                    }
+                }
+                WatcherWork::Remove { path } => {
+                    if let Err(e) = installer_sync_worker.remove_map_by_path(path).await {
+                        warn!(error = %e, "Failed to remove map from registry after file deletion");
+                    }
+                }
+            }
+        }
+    });
+
     let watcher_task = tokio::spawn(async move {
         info!("Watcher task started");
         let mut receiver = watcher_events;
@@ -148,8 +252,11 @@ async fn main() -> anyhow::Result<()> {
                                 info!(path = %path.display(), "File removed from addons directory");
                                 pending.remove(&path);
                                 last_unstable_log.remove(&path);
-                                if let Err(e) = installer_watcher.remove_map_by_path(path).await {
-                                    warn!(error = %e, "Failed to remove map from registry after file deletion");
+                                if watcher_work_tx
+                                    .try_send(WatcherWork::Remove { path })
+                                    .is_err()
+                                {
+                                    warn!("Watcher work queue full; dropped remove job");
                                 }
                             }
                         }
@@ -164,17 +271,23 @@ async fn main() -> anyhow::Result<()> {
                         .collect();
 
                     for (path, entry) in ready {
-                        let pending_age_ms = now.duration_since(entry.first_seen).as_millis();
                         let force_unstable = should_force_sync(entry.first_seen, now, max_stable_wait);
 
-                        if !force_unstable && !utils::file_is_stable(&path).await {
+                        // Fast non-blocking stability probe: only enqueue when stable or forced.
+                        // Avoid sleeping in the event loop (file_is_stable sleeps 150ms).
+                        let size_now = std::fs::metadata(&path).ok().map(|m| m.len());
+                        let looks_stable = size_now.is_some_and(|size| {
+                            // Re-check size without sleep; worker does the authoritative stable check.
+                            std::fs::metadata(&path).ok().map(|m| m.len()) == Some(size)
+                        });
+
+                        if !force_unstable && !looks_stable {
                             let should_log = last_unstable_log
                                 .get(&path)
                                 .is_none_or(|last| now.duration_since(*last) >= Duration::from_secs(1));
                             if should_log {
                                 debug!(
                                     path = %path.display(),
-                                    pending_age_ms,
                                     "File still unstable, waiting for size to settle"
                                 );
                                 last_unstable_log.insert(path.clone(), now);
@@ -182,25 +295,17 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
 
-                        if force_unstable {
-                            warn!(
-                                path = %path.display(),
-                                pending_age_ms,
-                                max_stable_wait_secs = max_stable_wait.as_secs(),
-                                "File never stabilized, forcing sync attempt"
-                            );
-                        }
-
                         pending.remove(&path);
                         last_unstable_log.remove(&path);
-                        if let Err(e) = installer_watcher.sync_map_from_path(path.clone()).await {
-                            warn!(
-                                error = %e,
-                                path = %path.display(),
-                                pending_age_ms,
-                                forced_unstable = force_unstable,
-                                "Failed to sync map from path"
-                            );
+                        if watcher_work_tx
+                            .try_send(WatcherWork::Sync {
+                                path,
+                                first_seen: entry.first_seen,
+                                force_unstable,
+                            })
+                            .is_err()
+                        {
+                            warn!("Watcher work queue full; dropped sync job");
                         }
                     }
                 }
@@ -219,6 +324,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Per-update exponential backoff for repeatedly failing backend actions.
         let mut failure_backoff: HashMap<String, (u32, Instant)> = HashMap::new();
+        let mut last_push_fingerprint: Option<u64> = None;
 
         loop {
             interval.tick().await;
@@ -226,10 +332,17 @@ async fn main() -> anyhow::Result<()> {
             let current_config = read_config(&sync_config_handle);
             if current_config.sync_interval_secs != interval_secs {
                 interval_secs = current_config.sync_interval_secs;
-                interval =
-                    tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+                // Avoid an immediate burst tick when rebuilding the interval.
+                interval = tokio::time::interval_at(
+                    tokio::time::Instant::now() + Duration::from_secs(interval_secs),
+                    Duration::from_secs(interval_secs),
+                );
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             }
+
+            // Prune stale backoff entries (keep for at most 1h past expiry).
+            let backoff_cutoff = Instant::now() - Duration::from_secs(3600);
+            failure_backoff.retain(|_, (_, retry_after)| *retry_after > backoff_cutoff);
 
             // Fetch updates from backend
             match sync_service_clone.fetch_updates().await {
@@ -316,12 +429,17 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // Push local state to backend
+            // Push local state to backend when content changed.
             match installer_sync.registry().list_maps().await {
                 Ok(maps) => {
                     let visible = read_denylist(&sync_config_handle).filter_visible(maps);
-                    if let Err(e) = sync_service_clone.sync_registry(visible).await {
+                    let fingerprint = registry_sync_fingerprint(&visible);
+                    if last_push_fingerprint == Some(fingerprint) {
+                        debug!("Skipping registry push; content unchanged");
+                    } else if let Err(e) = sync_service_clone.sync_registry(visible).await {
                         error!(error = %e, "Failed to sync registry to backend");
+                    } else {
+                        last_push_fingerprint = Some(fingerprint);
                     }
                 }
                 Err(e) => {
@@ -394,6 +512,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Initiating graceful shutdown...");
     
     watcher_task.abort();
+    watcher_worker.abort();
     sync_task.abort();
     steam_health_task.abort();
     http_task.abort();

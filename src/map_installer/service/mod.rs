@@ -25,9 +25,9 @@ pub struct MapInstallationService {
     vpk_extractor: VpkExtractor,
     addons_dir: PathBuf,
     temp_dir: PathBuf,
-    op_lock: Mutex<()>,
+    pub(super) op_lock: Mutex<()>,
     /// Caps concurrent heavy download/install work before op_lock is taken.
-    download_semaphore: Semaphore,
+    pub(super) download_semaphore: Semaphore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +151,15 @@ impl MapInstallationService {
         crate::utils::validate_url_resolved(&url)
             .await
             .context("Invalid URL format (SSRF protection)")?;
+
+        if let Some(existing) = self.find_map_by_source_url(&url).await? {
+            info!(
+                map_id = existing.id,
+                url = %url,
+                "Map with this source URL already installed, skipping download"
+            );
+            return Ok(existing);
+        }
 
         // Install from ZIP URL (url parser no longer needed since workshop_id is separate)
         self.install_from_zip_url(&url, name).await
@@ -358,6 +367,9 @@ impl MapInstallationService {
             }
 
         if self.find_map_by_name(&map_name).await?.is_some() {
+            if let Err(e) = tokio::fs::remove_file(&vpk_path).await {
+                warn!(error = %e, path = %vpk_path.display(), "Failed to clean up downloaded file after name collision");
+            }
             return Err(anyhow::anyhow!(
                 "Map with name '{}' already installed",
                 map_name
@@ -371,9 +383,11 @@ impl MapInstallationService {
             return Ok(existing);
         }
 
-        // Copy VPK file to addons directory
-        tokio::fs::copy(&vpk_path, &install_path).await?;
-        info!(source = %vpk_path.display(), dest = %install_path.display(), "Copied VPK file");
+        // Atomic install into addons directory
+        crate::utils::atomic_replace_file(&vpk_path, &install_path)
+            .await
+            .context("Failed to install VPK file into addons directory")?;
+        info!(source = %vpk_path.display(), dest = %install_path.display(), "Installed VPK file");
 
         // Calculate MD5 checksum
         let checksum = crate::utils::calculate_file_md5(&install_path).await.ok();
@@ -582,6 +596,12 @@ impl MapInstallationService {
         }
 
         if self.find_map_by_name(&map_name).await?.is_some() {
+            if let Err(e) = tokio::fs::remove_dir_all(&extract_temp).await {
+                warn!(error = %e, path = %extract_temp.display(), "Failed to clean up extract temp after name collision");
+            }
+            if let Err(e) = tokio::fs::remove_file(&archive_path).await {
+                warn!(error = %e, path = %archive_path.display(), "Failed to clean up archive after name collision");
+            }
             return Err(anyhow::anyhow!(
                 "Map with name '{map_name}' already installed"
             ));
@@ -593,13 +613,13 @@ impl MapInstallationService {
             return Ok(existing);
         }
 
-        tokio::fs::copy(&source_vpk_path, &install_path)
+        crate::utils::atomic_replace_file(&source_vpk_path, &install_path)
             .await
-            .context("Failed to copy VPK file to addons directory")?;
+            .context("Failed to install VPK file into addons directory")?;
         info!(
             source = %source_vpk_path.display(),
             dest = %install_path.display(),
-            "Copied VPK file from archive"
+            "Installed VPK file from archive"
         );
 
         let checksum = crate::utils::calculate_file_md5(&install_path).await.ok();
@@ -854,25 +874,22 @@ impl MapInstallationService {
         &self,
         relative_path: &str,
     ) -> anyhow::Result<Option<MapEntry>> {
-        let maps = self.registry.list_maps().await?;
-        Ok(maps
-            .into_iter()
-            .find(|m| m.installed_path == relative_path))
+        self.registry.find_by_installed_path(relative_path).await
     }
 
     async fn find_map_by_workshop_id(
         &self,
         workshop_id: u64,
     ) -> anyhow::Result<Option<MapEntry>> {
-        let maps = self.registry.list_maps().await?;
-        Ok(maps
-            .into_iter()
-            .find(|m| m.workshop_id == Some(workshop_id)))
+        self.registry.find_by_workshop_id(workshop_id).await
     }
 
     async fn find_map_by_name(&self, name: &str) -> anyhow::Result<Option<MapEntry>> {
-        let maps = self.registry.list_maps().await?;
-        Ok(maps.into_iter().find(|m| m.name == name))
+        self.registry.find_by_name(name).await
+    }
+
+    async fn find_map_by_source_url(&self, url: &str) -> anyhow::Result<Option<MapEntry>> {
+        self.registry.find_by_source_url(url).await
     }
 
     pub(super) async fn register_new_map(

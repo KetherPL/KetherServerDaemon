@@ -24,7 +24,9 @@ pub fn needs_l4d2center_update(
     }
     match local_checksum {
         Some(local) if md5_matches(local, index_md5) => false,
-        _ => true,
+        Some(_) => true,
+        // Missing checksum is unknown — do not treat as outdated unless forced.
+        None => force,
     }
 }
 
@@ -42,6 +44,12 @@ impl MapInstallationService {
         index_url: &str,
         name: &str,
     ) -> anyhow::Result<MapEntry> {
+        let _download_permit = self
+            .download_semaphore
+            .acquire()
+            .await
+            .expect("download semaphore closed");
+
         let entries = fetch_index(index_url).await?;
         let Some(index_entry) = find_index_entry(&entries, name) else {
             anyhow::bail!("Map '{name}' not found in L4D2Center catalog");
@@ -59,7 +67,8 @@ impl MapInstallationService {
         }
 
         let download_url = encode_download_url(&index_entry.download_link);
-        crate::utils::validate_url(&download_url)
+        crate::utils::validate_url_resolved(&download_url)
+            .await
             .context("Invalid L4D2Center download URL (SSRF protection)")?;
 
         let downloaded_path = self.zip_downloader.download_zip(&download_url).await?;
@@ -104,7 +113,7 @@ impl MapInstallationService {
         force: bool,
         check_only: bool,
     ) -> anyhow::Result<L4d2CenterUpdateReport> {
-        let _guard = self.op_lock.lock().await;
+        // Do not hold op_lock across downloads — only around disk/registry replace.
 
         let mut report = L4d2CenterUpdateReport {
             updated: Vec::new(),
@@ -180,6 +189,12 @@ impl MapInstallationService {
 
             info!(map_id, name = %index_entry.name, "Updating outdated L4D2Center map");
 
+            let _download_permit = self
+                .download_semaphore
+                .acquire()
+                .await
+                .expect("download semaphore closed");
+
             let download_url = encode_download_url(&index_entry.download_link);
             let downloaded = match self.zip_downloader.download_zip(&download_url).await {
                 Ok(path) => path,
@@ -221,6 +236,8 @@ impl MapInstallationService {
 
         let (source_vpk, temp_cleanup) = self.prepare_vpk_from_download(downloaded).await?;
 
+        let _guard = self.op_lock.lock().await;
+
         let backup_path = install_path.with_extension("vpk.bak");
         let had_existing = install_path.exists();
         if had_existing {
@@ -257,12 +274,17 @@ impl MapInstallationService {
             ));
         }
 
-        let _ = tokio::fs::remove_file(&backup_path).await;
-
-        let metadata = self
+        let metadata = match self
             .vpk_extractor
             .extract_vpk_metadata(install_path.clone())
-            .await?;
+            .await
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                Self::restore_vpk_backup(&install_path, &backup_path, had_existing).await;
+                return Err(error);
+            }
+        };
         let installed_at = Self::file_modified_time(&install_path)
             .await
             .unwrap_or_else(chrono::Utc::now);
@@ -274,7 +296,12 @@ impl MapInstallationService {
         updated.installed_at = installed_at;
         updated.source_kind = SourceKind::L4d2Center;
 
-        self.registry.update_map(updated.clone()).await?;
+        if let Err(error) = self.registry.update_map(updated.clone()).await {
+            Self::restore_vpk_backup(&install_path, &backup_path, had_existing).await;
+            return Err(error).context("Failed to persist L4D2Center map update in registry");
+        }
+
+        let _ = tokio::fs::remove_file(&backup_path).await;
         Ok(updated)
     }
 }
@@ -295,12 +322,13 @@ mod tests {
             "ABC123",
             false
         ));
-        assert!(needs_l4d2center_update(None, "abc123", false));
         assert!(needs_l4d2center_update(
             Some("old"),
             "new",
             false
         ));
+        assert!(!needs_l4d2center_update(None, "abc123", false));
+        assert!(needs_l4d2center_update(None, "abc123", true));
     }
 
     #[test]

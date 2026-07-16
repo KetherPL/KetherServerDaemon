@@ -57,7 +57,7 @@ pub(super) mod helpers {
         log_msg: &'static str,
     ) -> ApiError {
         tracing::error!(error = %e, "{log_msg}");
-        ApiError::internal(e.to_string())
+        ApiError::internal("Internal server error")
     }
 
     pub(super) fn installer_internal_err(
@@ -65,6 +65,6 @@ pub(super) mod helpers {
         log_msg: &'static str,
     ) -> ApiError {
         tracing::error!(error = %e, "{log_msg}");
-        ApiError::internal(e.to_string())
+        ApiError::internal("Internal server error")
     }
 }

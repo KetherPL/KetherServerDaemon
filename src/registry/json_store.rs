@@ -190,7 +190,8 @@ impl JsonRegistry {
 #[async_trait]
 impl Registry for JsonRegistry {
     async fn add_map(&self, mut entry: MapEntry) -> anyhow::Result<u64> {
-        let id = {
+        let _guard = self.save_lock.lock().await;
+        let (id, snapshot) = {
             let mut state = self
                 .inner
                 .write()
@@ -198,28 +199,52 @@ impl Registry for JsonRegistry {
             let id = state.keys().max().copied().unwrap_or(0) + 1;
             entry.id = id;
             state.insert(id, Self::map_data_from_entry(entry));
-            id
+            (id, state.clone())
         };
 
-        self.persist().await?;
+        if let Err(error) = Self::save_snapshot(&self.path, &snapshot).await {
+            let mut state = self
+                .inner
+                .write()
+                .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+            state.remove(&id);
+            return Err(error);
+        }
+
         info!(map_id = id, "Added map to JSON registry");
         Ok(id)
     }
 
     async fn remove_map(&self, id: u64) -> anyhow::Result<()> {
-        let removed = {
+        let _guard = self.save_lock.lock().await;
+        let previous = {
             let mut state = self
                 .inner
                 .write()
                 .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
-            state.remove(&id).is_some()
+            state.remove(&id)
+        };
+        let Some(previous) = previous else {
+            return Ok(());
         };
 
-        if !removed {
-            return Ok(());
+        let snapshot = {
+            let state = self
+                .inner
+                .read()
+                .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+            state.clone()
+        };
+
+        if let Err(error) = Self::save_snapshot(&self.path, &snapshot).await {
+            let mut state = self
+                .inner
+                .write()
+                .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+            state.insert(id, previous);
+            return Err(error);
         }
 
-        self.persist().await?;
         info!(map_id = id, "Removed map from JSON registry");
         Ok(())
     }
@@ -249,42 +274,131 @@ impl Registry for JsonRegistry {
     }
 
     async fn update_map(&self, entry: MapEntry) -> anyhow::Result<()> {
-        let updated = {
+        let _guard = self.save_lock.lock().await;
+        let id = entry.id;
+        let previous = {
             let mut state = self
                 .inner
                 .write()
                 .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
-            if !state.contains_key(&entry.id) {
-                return Ok(());
+            if !state.contains_key(&id) {
+                return Err(anyhow::anyhow!("Map #{id} not found for update"));
             }
-            let id = entry.id;
-            state.insert(id, Self::map_data_from_entry(entry));
-            true
+            state.insert(id, Self::map_data_from_entry(entry))
         };
 
-        if updated {
-            self.persist().await?;
+        let snapshot = {
+            let state = self
+                .inner
+                .read()
+                .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+            state.clone()
+        };
+
+        if let Err(error) = Self::save_snapshot(&self.path, &snapshot).await {
+            if let Some(previous) = previous {
+                let mut state = self
+                    .inner
+                    .write()
+                    .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+                state.insert(id, previous);
+            }
+            return Err(error);
         }
         Ok(())
     }
 
     async fn replace_all_maps(&self, entries: Vec<MapEntry>) -> anyhow::Result<()> {
-        {
+        let _guard = self.save_lock.lock().await;
+        let previous = {
             let mut state = self
                 .inner
                 .write()
                 .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+            let previous = state.clone();
             state.clear();
             for entry in entries {
                 let id = entry.id;
                 state.insert(id, Self::map_data_from_entry(entry));
             }
+            previous
+        };
+
+        let snapshot = {
+            let state = self
+                .inner
+                .read()
+                .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+            state.clone()
+        };
+
+        if let Err(error) = Self::save_snapshot(&self.path, &snapshot).await {
+            let mut state = self
+                .inner
+                .write()
+                .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+            *state = previous;
+            return Err(error);
         }
 
-        self.persist().await?;
-        let count = self.list_maps().await?.len();
-        info!(count, "Replaced all maps in JSON registry");
+        info!(count = snapshot.len(), "Replaced all maps in JSON registry");
         Ok(())
+    }
+
+    async fn find_by_workshop_id(&self, workshop_id: u64) -> anyhow::Result<Option<MapEntry>> {
+        let state = self
+            .inner
+            .read()
+            .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+        Ok(state.iter().find_map(|(id, data)| {
+            if data.workshop_id == Some(workshop_id) {
+                Some(Self::map_entry_from_data(*id, data))
+            } else {
+                None
+            }
+        }))
+    }
+
+    async fn find_by_installed_path(&self, path: &str) -> anyhow::Result<Option<MapEntry>> {
+        let state = self
+            .inner
+            .read()
+            .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+        Ok(state.iter().find_map(|(id, data)| {
+            if data.installed_path == path {
+                Some(Self::map_entry_from_data(*id, data))
+            } else {
+                None
+            }
+        }))
+    }
+
+    async fn find_by_name(&self, name: &str) -> anyhow::Result<Option<MapEntry>> {
+        let state = self
+            .inner
+            .read()
+            .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+        Ok(state.iter().find_map(|(id, data)| {
+            if data.name == name {
+                Some(Self::map_entry_from_data(*id, data))
+            } else {
+                None
+            }
+        }))
+    }
+
+    async fn find_by_source_url(&self, url: &str) -> anyhow::Result<Option<MapEntry>> {
+        let state = self
+            .inner
+            .read()
+            .map_err(|e| anyhow::anyhow!("Registry lock poisoned: {e}"))?;
+        Ok(state.iter().find_map(|(id, data)| {
+            if data.source_url == url {
+                Some(Self::map_entry_from_data(*id, data))
+            } else {
+                None
+            }
+        }))
     }
 }
 
@@ -431,11 +545,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_non_existent_map_is_ok() {
+    async fn test_update_non_existent_map_errors() {
         let (_temp_dir, _path, registry) = setup_test_registry().await;
         let mut entry = create_test_map_entry(0);
         entry.id = 99999;
-        registry.update_map(entry).await.unwrap();
+        let result = registry.update_map(entry).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[tokio::test]

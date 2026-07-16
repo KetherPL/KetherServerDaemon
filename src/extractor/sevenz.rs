@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use sevenz_rust::{Password, SevenZReader};
 use tracing::info;
 
+use crate::extractor::limiting_writer::LimitingWriter;
 use crate::extractor::traits::Extractor;
 use crate::utils::{resolve_archive_entry_path, validate_archive_entry_name};
 
@@ -73,11 +74,23 @@ impl SevenZExtractor {
         }
 
         let dest = dest.to_path_buf();
+        let mut total_written: u64 = 0;
         seven
             .for_each_entries(|entry, reader| {
-                Self::extract_entry(entry, reader, &dest).map_err(|error| {
-                    sevenz_rust::Error::other(error.to_string())
-                })
+                let written = Self::extract_entry(
+                    entry,
+                    reader,
+                    &dest,
+                    max_extraction_size.saturating_sub(total_written),
+                )
+                .map_err(|error| sevenz_rust::Error::other(error.to_string()))?;
+                total_written = total_written.saturating_add(written);
+                if total_written > max_extraction_size {
+                    return Err(sevenz_rust::Error::other(format!(
+                        "Total extraction size {total_written} exceeds maximum {max_extraction_size} bytes"
+                    )));
+                }
+                Ok(true)
             })
             .map_err(|error| anyhow::anyhow!("7z extraction failed: {error}"))?;
 
@@ -88,13 +101,14 @@ impl SevenZExtractor {
         entry: &sevenz_rust::SevenZArchiveEntry,
         reader: &mut dyn Read,
         dest: &Path,
-    ) -> anyhow::Result<bool> {
+        remaining_budget: u64,
+    ) -> anyhow::Result<u64> {
         validate_archive_entry_name(entry.name())?;
         let out_path = resolve_archive_entry_path(dest, entry.name())?;
 
         if entry.is_directory() {
             std::fs::create_dir_all(&out_path)?;
-            return Ok(true);
+            return Ok(0);
         }
 
         if let Some(parent) = out_path.parent() {
@@ -102,12 +116,20 @@ impl SevenZExtractor {
         }
 
         let file = File::create(&out_path)?;
-        if entry.size() > 0 {
-            let mut writer = BufWriter::new(file);
-            std::io::copy(reader, &mut writer)?;
+        if entry.size() == 0 && remaining_budget == 0 {
+            return Ok(0);
         }
 
-        Ok(true)
+        let mut limited = LimitingWriter::new(BufWriter::new(file), remaining_budget);
+        if entry.size() > 0 || remaining_budget > 0 {
+            std::io::copy(reader, &mut limited).map_err(|error| {
+                let _ = std::fs::remove_file(&out_path);
+                anyhow::anyhow!("7z extraction failed for {}: {error}", entry.name())
+            })?;
+            limited.flush()?;
+        }
+
+        Ok(limited.written())
     }
 }
 
@@ -200,7 +222,7 @@ mod tests {
             "../evil.vpk".to_string(),
         );
         let mut empty: &[u8] = &[];
-        let result = SevenZExtractor::extract_entry(&entry, &mut empty, dest);
+        let result = SevenZExtractor::extract_entry(&entry, &mut empty, dest, 1024);
         assert!(result.is_err());
     }
 }

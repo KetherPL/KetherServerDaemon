@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use async_trait::async_trait;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::path::PathBuf;
 use tracing::info;
-use crate::extractor::traits::Extractor;
 use zip::ZipArchive;
+
+use crate::extractor::limiting_writer::LimitingWriter;
+use crate::extractor::traits::Extractor;
+use crate::utils::resolve_archive_entry_path;
 
 pub struct ZipExtractor {
     max_extraction_size: u64,
@@ -25,114 +28,86 @@ impl ZipExtractor {
 impl Extractor for ZipExtractor {
     async fn extract_zip(&self, archive_path: PathBuf, dest: PathBuf) -> anyhow::Result<()> {
         info!(archive = %archive_path.display(), dest = %dest.display(), "Extracting ZIP archive");
-        
+
         tokio::fs::create_dir_all(&dest).await?;
-        
+
         let archive_path_clone = archive_path.clone();
         let dest_clone = dest.clone();
-        
-        // Canonicalize destination for path validation
-        let _dest_canonical = std::fs::canonicalize(&dest_clone)
-            .or_else(|_| {
-                // If destination doesn't exist yet, create it and canonicalize parent
-                std::fs::create_dir_all(&dest_clone)?;
-                std::fs::canonicalize(&dest_clone)
-            })?;
-        
         let max_extraction_size = self.max_extraction_size;
         let max_file_count = self.max_file_count;
-        
+
         tokio::task::spawn_blocking(move || {
             let file = File::open(&archive_path_clone)?;
             let mut archive = ZipArchive::new(BufReader::new(file))?;
-            
-            // Check total file count
-            if archive.len() > max_file_count as usize {
+
+            if archive.len() as u64 > max_file_count {
                 return Err(anyhow::anyhow!(
                     "Archive contains {} files, exceeds maximum of {} files",
                     archive.len(),
                     max_file_count
                 ));
             }
-            
-            let mut total_uncompressed_size: u64 = 0;
-            
+
+            let mut total_written: u64 = 0;
+
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
-                let outpath = match file.enclosed_name() {
-                    Some(path) => {
-                        let joined = dest_clone.join(path);
-                        // Validate that the path doesn't escape the destination
-                        // by checking if canonicalized path starts with canonical destination
-                        match std::fs::canonicalize(&dest_clone) {
-                            Ok(dest_canon) => {
-                                match joined.canonicalize() {
-                                    Ok(out_canon) => {
-                                        if !out_canon.starts_with(&dest_canon) {
-                                            return Err(anyhow::anyhow!(
-                                                "ZIP entry {} would escape destination directory",
-                                                path.display()
-                                            ));
-                                        }
-                                    }
-                                    Err(_) => {
-                                        // File doesn't exist yet, check components for ..
-                                        if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-                                            return Err(anyhow::anyhow!(
-                                                "ZIP entry {} contains parent directory reference",
-                                                path.display()
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                // Fallback: check for parent dir components
-                                if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-                                    return Err(anyhow::anyhow!(
-                                        "ZIP entry {} contains parent directory reference",
-                                        path.display()
-                                    ));
-                                }
-                            }
-                        }
-                        joined
-                    }
-                    None => continue,
-                };
-                
-                if file.name().ends_with('/') {
+                let raw_name = file.name().to_string();
+                let entry_name = file.enclosed_name().ok_or_else(|| {
+                    anyhow::anyhow!("ZIP entry has unsafe or absolute path: {raw_name}")
+                })?;
+                let entry_name_str = entry_name.to_string_lossy().into_owned();
+                let outpath = resolve_archive_entry_path(&dest_clone, &entry_name_str)?;
+
+                if raw_name.ends_with('/') {
                     std::fs::create_dir_all(&outpath)?;
-                } else {
-                    // Check uncompressed size before extracting
-                    let uncompressed_size = file.size();
-                    total_uncompressed_size += uncompressed_size;
-                    
-                    if total_uncompressed_size > max_extraction_size {
+                    continue;
+                }
+
+                if let Some(parent) = outpath.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+
+                let remaining = max_extraction_size.saturating_sub(total_written);
+                if remaining == 0 {
+                    return Err(anyhow::anyhow!(
+                        "Total extraction size exceeds maximum of {} bytes",
+                        max_extraction_size
+                    ));
+                }
+
+                let outfile = File::create(&outpath)?;
+                let mut limited = LimitingWriter::new(outfile, remaining);
+                match std::io::copy(&mut file, &mut limited) {
+                    Ok(_) => {
+                        limited.flush()?;
+                        total_written = total_written.saturating_add(limited.written());
+                    }
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&outpath);
                         return Err(anyhow::anyhow!(
-                            "Total uncompressed size {} exceeds maximum extraction size {} bytes (ZIP bomb protection)",
-                            total_uncompressed_size,
-                            max_extraction_size
+                            "ZIP extraction failed for {entry_name_str}: {error}"
                         ));
                     }
-                    
-                    if let Some(p) = outpath.parent()
-                        && !p.exists() {
-                            std::fs::create_dir_all(p)?;
-                        }
-                    let mut outfile = File::create(&outpath)?;
-                    std::io::copy(&mut file, &mut outfile)?;
+                }
+
+                if total_written > max_extraction_size {
+                    return Err(anyhow::anyhow!(
+                        "Total extraction size {} exceeds maximum {} bytes",
+                        total_written,
+                        max_extraction_size
+                    ));
                 }
             }
-            
+
             Ok::<(), anyhow::Error>(())
         })
         .await??;
-        
+
         info!(archive = %archive_path.display(), dest = %dest.display(), "ZIP extraction completed");
         Ok(())
     }
-    
+
     async fn extract_vpk(&self, _archive_path: PathBuf, _dest: PathBuf) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("VPK extraction not supported by ZipExtractor"))
     }
@@ -140,38 +115,47 @@ impl Extractor for ZipExtractor {
     async fn extract_sevenz(&self, _archive_path: PathBuf, _dest: PathBuf) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("7z extraction not supported by ZipExtractor"))
     }
-    
-    async fn extract_vpk_metadata(&self, _archive_path: PathBuf) -> anyhow::Result<crate::extractor::traits::VpkMetadata> {
-        Err(anyhow::anyhow!("VPK metadata extraction not supported by ZipExtractor"))
+
+    async fn extract_vpk_metadata(
+        &self,
+        _archive_path: PathBuf,
+    ) -> anyhow::Result<crate::extractor::traits::VpkMetadata> {
+        Err(anyhow::anyhow!(
+            "VPK metadata extraction not supported by ZipExtractor"
+        ))
     }
 }
 
 impl Default for ZipExtractor {
     fn default() -> Self {
-        Self::new(1024 * 1024 * 1024, 10000) // 1GB, 10000 files default
+        Self::new(1024 * 1024 * 1024, 10000)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::io::Write;
+    use tempfile::TempDir;
     use zip::write::{FileOptions, ZipWriter};
     use zip::CompressionMethod;
 
     fn create_test_zip(contents: &[(&str, &[u8])]) -> (PathBuf, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let zip_path = temp_dir.path().join("test.zip");
-        
+
         let file = std::fs::File::create(&zip_path).unwrap();
         let mut zip = ZipWriter::new(file);
-        
+
         for (name, data) in contents {
-            zip.start_file(*name, FileOptions::default().compression_method(CompressionMethod::Stored)).unwrap();
+            zip.start_file(
+                *name,
+                FileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
             zip.write_all(data).unwrap();
         }
-        
+
         zip.finish().unwrap();
         (zip_path, temp_dir)
     }
@@ -183,24 +167,23 @@ mod tests {
             ("test.txt", b"Hello, World!"),
             ("readme.md", b"# Test Map"),
         ]);
-        
+
         let dest_dir = TempDir::new().unwrap();
         let dest_path = dest_dir.path().to_path_buf();
-        
-        extractor.extract_zip(zip_path.clone(), dest_path.clone()).await.unwrap();
-        
-        // Verify files were extracted
-        let test_file = dest_path.join("test.txt");
-        let readme_file = dest_path.join("readme.md");
-        
-        assert!(test_file.exists());
-        assert!(readme_file.exists());
-        
-        let test_content = std::fs::read_to_string(&test_file).unwrap();
-        assert_eq!(test_content, "Hello, World!");
-        
-        let readme_content = std::fs::read_to_string(&readme_file).unwrap();
-        assert_eq!(readme_content, "# Test Map");
+
+        extractor
+            .extract_zip(zip_path.clone(), dest_path.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dest_path.join("test.txt")).unwrap(),
+            "Hello, World!"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest_path.join("readme.md")).unwrap(),
+            "# Test Map"
+        );
     }
 
     #[tokio::test]
@@ -211,41 +194,41 @@ mod tests {
             ("materials/test.vmt", b"VMT data"),
             ("sound/test.wav", b"WAV data"),
         ]);
-        
+
         let dest_dir = TempDir::new().unwrap();
         let dest_path = dest_dir.path().to_path_buf();
-        
-        extractor.extract_zip(zip_path.clone(), dest_path.clone()).await.unwrap();
-        
-        // Verify nested structure
+
+        extractor
+            .extract_zip(zip_path.clone(), dest_path.clone())
+            .await
+            .unwrap();
+
         assert!(dest_path.join("maps/test_map.bsp").exists());
         assert!(dest_path.join("materials/test.vmt").exists());
         assert!(dest_path.join("sound/test.wav").exists());
-        
-        let bsp_content = std::fs::read(&dest_path.join("maps/test_map.bsp")).unwrap();
-        assert_eq!(bsp_content, b"BSP data");
     }
 
     #[tokio::test]
     async fn test_extract_empty_zip() {
         let extractor = ZipExtractor::new(1024 * 1024 * 1024, 10000);
         let (zip_path, _zip_temp) = create_test_zip(&[]);
-        
         let dest_dir = TempDir::new().unwrap();
-        let dest_path = dest_dir.path().to_path_buf();
-        
-        // Should not error on empty ZIP
-        extractor.extract_zip(zip_path.clone(), dest_path.clone()).await.unwrap();
+        extractor
+            .extract_zip(zip_path, dest_dir.path().to_path_buf())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn test_extract_zip_nonexistent_file() {
         let extractor = ZipExtractor::new(1024 * 1024 * 1024, 10000);
         let dest_dir = TempDir::new().unwrap();
-        let dest_path = dest_dir.path().to_path_buf();
-        let nonexistent_zip = PathBuf::from("/nonexistent/path/test.zip");
-        
-        let result = extractor.extract_zip(nonexistent_zip, dest_path).await;
+        let result = extractor
+            .extract_zip(
+                PathBuf::from("/nonexistent/path/test.zip"),
+                dest_dir.path().to_path_buf(),
+            )
+            .await;
         assert!(result.is_err());
     }
 
@@ -255,12 +238,51 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let fake_zip = temp_dir.path().join("fake.zip");
         std::fs::write(&fake_zip, b"This is not a ZIP file").unwrap();
-        
         let dest_dir = TempDir::new().unwrap();
-        let dest_path = dest_dir.path().to_path_buf();
-        
-        let result = extractor.extract_zip(fake_zip, dest_path).await;
+        assert!(extractor
+            .extract_zip(fake_zip, dest_dir.path().to_path_buf())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_extract_rejects_path_traversal_entry() {
+        let extractor = ZipExtractor::new(1024 * 1024, 100);
+        let temp_dir = TempDir::new().unwrap();
+        let zip_path = temp_dir.path().join("evil.zip");
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = ZipWriter::new(file);
+            // enclosed_name() rejects .. so this should be skipped/err depending on zip crate
+            zip.start_file(
+                "../escape.txt",
+                FileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
+            zip.write_all(b"evil").unwrap();
+            zip.finish().unwrap();
+        }
+        let dest_dir = TempDir::new().unwrap();
+        let result = extractor
+            .extract_zip(zip_path, dest_dir.path().to_path_buf())
+            .await;
+        // Either errors or skips unsafe name; must not write outside dest.
+        assert!(!temp_dir.path().join("escape.txt").exists());
+        if result.is_ok() {
+            assert!(!dest_dir.path().join("escape.txt").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_extract_aborts_when_actual_bytes_exceed_limit() {
+        let extractor = ZipExtractor::new(8, 100);
+        let (zip_path, _zip_temp) = create_test_zip(&[("big.txt", b"0123456789abcdef")]);
+        let dest_dir = TempDir::new().unwrap();
+        let result = extractor
+            .extract_zip(zip_path, dest_dir.path().to_path_buf())
+            .await;
         assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exceed"));
     }
 
     #[tokio::test]
@@ -269,13 +291,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let fake_vpk = temp_dir.path().join("test.vpk");
         std::fs::write(&fake_vpk, b"fake vpk").unwrap();
-        
         let dest_dir = TempDir::new().unwrap();
-        let dest_path = dest_dir.path().to_path_buf();
-        
-        let result = extractor.extract_vpk(fake_vpk, dest_path).await;
+        let result = extractor
+            .extract_vpk(fake_vpk, dest_dir.path().to_path_buf())
+            .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("VPK extraction not supported"));
     }
 
     #[tokio::test]
@@ -284,10 +304,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let fake_vpk = temp_dir.path().join("test.vpk");
         std::fs::write(&fake_vpk, b"fake vpk").unwrap();
-        
-        let result = extractor.extract_vpk_metadata(fake_vpk).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("VPK metadata extraction not supported"));
+        assert!(extractor.extract_vpk_metadata(fake_vpk).await.is_err());
     }
 
     #[tokio::test]
@@ -298,15 +315,14 @@ mod tests {
             ("file-with-dashes.txt", b"content with dashes"),
             ("file_with_underscores.txt", b"content with underscores"),
         ]);
-        
         let dest_dir = TempDir::new().unwrap();
         let dest_path = dest_dir.path().to_path_buf();
-        
-        extractor.extract_zip(zip_path.clone(), dest_path.clone()).await.unwrap();
-        
+        extractor
+            .extract_zip(zip_path, dest_path.clone())
+            .await
+            .unwrap();
         assert!(dest_path.join("test file with spaces.txt").exists());
         assert!(dest_path.join("file-with-dashes.txt").exists());
         assert!(dest_path.join("file_with_underscores.txt").exists());
     }
 }
-

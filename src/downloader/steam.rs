@@ -161,7 +161,12 @@ impl SteamConnection {
         for item in &response.publishedfiledetails {
             let workshop_id = item.publishedfileid();
             let hcontent = item.hcontent_file();
-            if workshop_id == 0 || hcontent == 0 {
+            if workshop_id == 0 {
+                continue;
+            }
+            let file_url = parse_file_url(item);
+            // Keep CDN URL entries even when hcontent is missing (UFS fallback needs hcontent).
+            if hcontent == 0 && file_url.is_none() {
                 continue;
             }
             details.push(WorkshopFileDetails {
@@ -169,7 +174,7 @@ impl SteamConnection {
                 hcontent,
                 time_updated: item.time_updated(),
                 file_size: item.file_size(),
-                file_url: parse_file_url(item),
+                file_url,
             });
         }
 

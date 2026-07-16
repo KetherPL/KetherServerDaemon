@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use serde::{Deserialize, Serialize};
 
+use crate::downloader::client::HttpClient;
 use crate::registry::models::SourceKind;
 use crate::registry::traits::Registry;
-use crate::utils::{md5_matches, validate_url};
+use crate::utils::{md5_matches, validate_url_resolved};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,22 +35,15 @@ pub struct L4d2CenterCatalogEntry {
 }
 
 pub async fn fetch_index(url: &str) -> anyhow::Result<Vec<L4d2CenterIndexEntry>> {
-    validate_url(url).map_err(|e| anyhow::anyhow!("Invalid L4D2Center index URL: {e}"))?;
+    validate_url_resolved(url)
+        .await
+        .map_err(|e| anyhow::anyhow!("Invalid L4D2Center index URL: {e}"))?;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
-        .build()?;
-
-    let response = client.get(url).send().await?;
-    if !response.status().is_success() {
-        anyhow::bail!(
-            "Failed to fetch L4D2Center index: HTTP {}",
-            response.status()
-        );
-    }
-
-    let entries: Vec<L4d2CenterIndexEntry> = response.json().await?;
+    // Index JSON is small; reuse SSRF-hardened client with a modest size cap.
+    let client = HttpClient::new(16 * 1024 * 1024)?;
+    let body = client.get_text(url).await?;
+    let entries: Vec<L4d2CenterIndexEntry> = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("Failed to parse L4D2Center index JSON: {e}"))?;
     Ok(entries)
 }
 

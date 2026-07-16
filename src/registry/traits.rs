@@ -22,5 +22,10 @@ pub trait Registry: Send + Sync {
 
     /// Replace the entire registry contents with the provided entries
     async fn replace_all_maps(&self, entries: Vec<MapEntry>) -> anyhow::Result<()>;
+
+    async fn find_by_workshop_id(&self, workshop_id: u64) -> anyhow::Result<Option<MapEntry>>;
+    async fn find_by_installed_path(&self, path: &str) -> anyhow::Result<Option<MapEntry>>;
+    async fn find_by_name(&self, name: &str) -> anyhow::Result<Option<MapEntry>>;
+    async fn find_by_source_url(&self, url: &str) -> anyhow::Result<Option<MapEntry>>;
 }
 

@@ -131,6 +131,8 @@ fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
         || (octets[0] == 169 && octets[1] == 254)
         || octets[0] == 127
         || octets[0] == 0
+        // CGNAT / shared address space (RFC 6598)
+        || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127)
 }
 
 /// Check if an IPv6 address is private/internal
@@ -243,6 +245,7 @@ mod tests {
         assert!(is_private_ipv4(&Ipv4Addr::new(169, 254, 0, 1)));
         assert!(is_private_ipv4(&Ipv4Addr::new(127, 0, 0, 1)));
         assert!(!is_private_ipv4(&Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(is_private_ipv4(&Ipv4Addr::new(100, 64, 0, 1)));
     }
 
     #[tokio::test]

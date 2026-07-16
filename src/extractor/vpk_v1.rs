@@ -7,6 +7,8 @@ pub const VPK_SIGNATURE_V1: u32 = 0x55AA1234;
 pub const VPK_VERSION_V1: u32 = 1;
 pub const VPK_ENTRY_TERMINATOR: u16 = 0xFFFF;
 pub const VPK_EMBEDDED_ARCHIVE_INDEX: u16 = 0x7FFF;
+/// On-disk v1 header is signature(4) + version(4) + tree_size(4).
+pub const VPK_V1_HEADER_SIZE: u64 = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VpkV1Header {
@@ -97,8 +99,7 @@ pub fn read_addoninfo_bytes(
 
     if entry.entry_length > 0 {
         let chunk = if entry.archive_index == VPK_EMBEDDED_ARCHIVE_INDEX {
-            let tree_offset = std::mem::size_of::<VpkV1Header>() as u64;
-            let seek_pos = tree_offset + header.tree_size as u64 + entry.entry_offset as u64;
+            let seek_pos = VPK_V1_HEADER_SIZE + header.tree_size as u64 + entry.entry_offset as u64;
             file.seek(SeekFrom::Start(seek_pos))?;
             read_n(file, entry.entry_length as usize)?
         } else {
@@ -132,7 +133,7 @@ fn read_split_archive_bytes(vpk_path: &Path, entry: &VpkDirectoryEntry) -> anyho
 
     if entry.archive_index == 0xFF7F {
         let chunk_header = read_header(&mut chunk)?;
-        let seek_pos = std::mem::size_of::<VpkV1Header>() as u64
+        let seek_pos = VPK_V1_HEADER_SIZE
             + chunk_header.tree_size as u64
             + entry.entry_offset as u64;
         chunk.seek(SeekFrom::Start(seek_pos))?;

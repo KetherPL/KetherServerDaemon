@@ -57,18 +57,30 @@ impl WorkshopDownloader {
     
     /// Get or initialize Steam connection (reconnects when missing).
     async fn get_steam_connection(&self) -> anyhow::Result<SteamConnection> {
-        let mut guard = self.steam_connection.lock().await;
-        if guard.is_none() {
-            *guard = Some(self.connect_steam().await?);
+        {
+            let guard = self.steam_connection.lock().await;
+            if let Some(connection) = guard.as_ref() {
+                return Ok(connection.clone());
+            }
         }
-        Ok(guard.as_ref().unwrap().clone())
+
+        let connection = self.connect_steam().await?;
+        let mut guard = self.steam_connection.lock().await;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        *guard = Some(connection.clone());
+        Ok(connection)
     }
 
     async fn reset_steam_connection(&self) -> anyhow::Result<SteamConnection> {
         warn!("Resetting Steam connection after request failure");
-        let mut guard = self.steam_connection.lock().await;
-        *guard = None;
+        {
+            let mut guard = self.steam_connection.lock().await;
+            *guard = None;
+        }
         let connection = self.connect_steam().await?;
+        let mut guard = self.steam_connection.lock().await;
         *guard = Some(connection.clone());
         Ok(connection)
     }
@@ -110,9 +122,12 @@ impl WorkshopDownloader {
 
     /// Probe a cached Steam connection and evict it if its transport is dead.
     pub async fn health_check(&self) {
-        let mut guard = self.steam_connection.lock().await;
-        let Some(connection) = guard.as_ref().cloned() else {
-            return;
+        let connection = {
+            let guard = self.steam_connection.lock().await;
+            match guard.as_ref() {
+                Some(connection) => connection.clone(),
+                None => return,
+            }
         };
 
         let result = tokio::time::timeout(
@@ -125,14 +140,14 @@ impl WorkshopDownloader {
             Ok(Ok(_)) => debug!("Steam connection health check succeeded"),
             Ok(Err(error)) if error.is_connection_error() => {
                 warn!(error = %error, "Steam connection health check failed; evicting connection");
-                guard.take();
+                self.steam_connection.lock().await.take();
             }
             Err(_) => {
                 warn!(
                     timeout_secs = STEAM_HEALTH_CHECK_TIMEOUT.as_secs(),
                     "Steam connection health check timed out; evicting connection"
                 );
-                guard.take();
+                self.steam_connection.lock().await.take();
             }
             Ok(Err(error)) => {
                 debug!(

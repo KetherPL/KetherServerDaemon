@@ -20,7 +20,7 @@ impl MapInstallationService {
         force: bool,
         check_only: bool,
     ) -> anyhow::Result<WorkshopUpdateReport> {
-        let _guard = self.op_lock.lock().await;
+        // Do not hold op_lock across downloads — only around disk/registry replace.
 
         let mut report = WorkshopUpdateReport {
             updated: Vec::new(),
@@ -105,6 +105,12 @@ impl MapInstallationService {
 
             info!(map_id, workshop_id, "Updating outdated workshop map");
 
+            let _download_permit = self
+                .download_semaphore
+                .acquire()
+                .await
+                .expect("download semaphore closed");
+
             let downloaded = match self
                 .workshop_downloader
                 .download_from_details(detail)
@@ -184,6 +190,8 @@ impl MapInstallationService {
 
         let (source_vpk, temp_cleanup) = self.prepare_vpk_from_download(downloaded).await?;
 
+        let _guard = self.op_lock.lock().await;
+
         let backup_path = install_path.with_extension("vpk.bak");
         let had_existing = install_path.exists();
         if had_existing {
@@ -216,13 +224,21 @@ impl MapInstallationService {
                 return Err(error);
             }
         };
-        let checksum = crate::utils::calculate_file_md5(&install_path).await.ok();
+        let checksum = match crate::utils::calculate_file_md5(&install_path).await {
+            Ok(value) => Some(value),
+            Err(error) => {
+                warn!(
+                    map_id = existing.id,
+                    error = %error,
+                    "Failed to checksum replaced workshop map"
+                );
+                None
+            }
+        };
         let checksum_kind = checksum.as_ref().map(|_| "md5".to_string());
         let installed_at = Self::file_modified_time(&install_path)
             .await
             .unwrap_or_else(chrono::Utc::now);
-
-        let _ = tokio::fs::remove_file(&backup_path).await;
 
         let mut updated = existing.clone();
         updated.version = Some(metadata.version);
@@ -237,7 +253,12 @@ impl MapInstallationService {
             }
         }
 
-        self.registry.update_map(updated.clone()).await?;
+        if let Err(error) = self.registry.update_map(updated.clone()).await {
+            Self::restore_vpk_backup(&install_path, &backup_path, had_existing).await;
+            return Err(error).context("Failed to persist workshop map update in registry");
+        }
+
+        let _ = tokio::fs::remove_file(&backup_path).await;
         Ok(updated)
     }
 
