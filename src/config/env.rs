@@ -18,6 +18,11 @@ pub mod keys {
     pub const MAX_EXTRACTION_SIZE_BYTES: &str = "KETHER_MAX_EXTRACTION_SIZE_BYTES";
     pub const MAX_EXTRACTION_FILE_COUNT: &str = "KETHER_MAX_EXTRACTION_FILE_COUNT";
     pub const L4D2CENTER_INDEX_URL: &str = "KETHER_L4D2CENTER_INDEX_URL";
+    pub const MAP_UPDATE_CHECK_INTERVAL_DAYS: &str = "KETHER_MAP_UPDATE_CHECK_INTERVAL_DAYS";
+    pub const WORKSHOP_UPDATE_CHECK_ENABLED: &str = "KETHER_WORKSHOP_UPDATE_CHECK_ENABLED";
+    pub const WORKSHOP_UPDATE_AUTO_APPLY: &str = "KETHER_WORKSHOP_UPDATE_AUTO_APPLY";
+    pub const L4D2CENTER_UPDATE_CHECK_ENABLED: &str = "KETHER_L4D2CENTER_UPDATE_CHECK_ENABLED";
+    pub const L4D2CENTER_UPDATE_AUTO_APPLY: &str = "KETHER_L4D2CENTER_UPDATE_AUTO_APPLY";
 }
 
 /// Apply environment variable overrides on top of file/default configuration.
@@ -55,6 +60,29 @@ pub fn apply_env_overrides(config: &mut Config) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var(keys::L4D2CENTER_INDEX_URL) {
         config.l4d2center_index_url = val;
     }
+    if let Ok(val) = std::env::var(keys::MAP_UPDATE_CHECK_INTERVAL_DAYS) {
+        config.map_update_check_interval_days = val.parse()?;
+    }
+    if let Ok(val) = std::env::var(keys::WORKSHOP_UPDATE_CHECK_ENABLED) {
+        config.workshop_update_check_enabled = parse_bool_env(&val)?;
+    }
+    if let Ok(val) = std::env::var(keys::WORKSHOP_UPDATE_AUTO_APPLY) {
+        config.workshop_update_auto_apply = parse_bool_env(&val)?;
+    }
+    if let Ok(val) = std::env::var(keys::L4D2CENTER_UPDATE_CHECK_ENABLED) {
+        config.l4d2center_update_check_enabled = parse_bool_env(&val)?;
+    }
+    if let Ok(val) = std::env::var(keys::L4D2CENTER_UPDATE_AUTO_APPLY) {
+        config.l4d2center_update_auto_apply = parse_bool_env(&val)?;
+    }
 
     Ok(())
+}
+
+fn parse_bool_env(val: &str) -> anyhow::Result<bool> {
+    match val.trim().to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        other => anyhow::bail!("Invalid boolean value '{other}'"),
+    }
 }

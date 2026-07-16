@@ -58,6 +58,11 @@ pub fn create_test_config() -> (Config, TempDir) {
         l4d2center_index_url: Config::default().l4d2center_index_url,
         hidden_workshop_ids: Vec::new(),
         hidden_map_ids: Vec::new(),
+        map_update_check_interval_days: Config::default().map_update_check_interval_days,
+        workshop_update_check_enabled: Config::default().workshop_update_check_enabled,
+        workshop_update_auto_apply: Config::default().workshop_update_auto_apply,
+        l4d2center_update_check_enabled: Config::default().l4d2center_update_check_enabled,
+        l4d2center_update_auto_apply: Config::default().l4d2center_update_auto_apply,
     };
 
     (config, dir)

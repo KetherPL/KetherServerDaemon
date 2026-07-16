@@ -12,7 +12,7 @@ use crate::api::http::HttpServer;
 #[cfg(test)]
 use crate::config::{init_handle, Config, ConfigHandle};
 #[cfg(test)]
-use crate::map_installer::MapInstallationService;
+use crate::map_installer::{MapInstallationService, PendingUpdatesState};
 #[cfg(test)]
 use crate::registry::traits::Registry;
 #[cfg(test)]
@@ -45,11 +45,13 @@ async fn setup_api_fixture_with_config(
     );
     config.l4d2center_index_url = "https://l4d2center.com/maps/servers/index.json".to_string();
     let config_handle = init_handle(config);
+    let pending_updates = PendingUpdatesState::new();
     (
         Arc::new(ApiHandlers::new(
             Arc::clone(&registry),
             installer,
             config_handle.clone(),
+            pending_updates,
         )),
         registry,
         dirs,

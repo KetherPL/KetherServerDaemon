@@ -14,7 +14,9 @@ use crate::api::types::{
     UpdateL4d2CenterRequest, UpdateWorkshopRequest,
 };
 use crate::catalog::L4d2CenterCatalogEntry;
-use crate::map_installer::{CompactReport, DiscoveryReport, L4d2CenterUpdateReport, WorkshopUpdateReport};
+use crate::map_installer::{
+    AvailableMapUpdate, CompactReport, DiscoveryReport, L4d2CenterUpdateReport, WorkshopUpdateReport,
+};
 use crate::registry::MapEntry;
 
 pub async fn health_handler() -> Json<ApiResponse<&'static str>> {
@@ -25,6 +27,12 @@ pub async fn list_maps_handler(
     axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
 ) -> Result<Json<ApiResponse<Vec<MapEntry>>>, ApiError> {
     handlers.list_maps().await
+}
+
+pub async fn list_available_updates_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+) -> Result<Json<ApiResponse<Vec<AvailableMapUpdate>>>, ApiError> {
+    handlers.list_available_updates().await
 }
 
 pub async fn get_map_handler(
@@ -109,6 +117,7 @@ pub fn routes(handlers: Arc<ApiHandlers>) -> Router {
         .route("/api/maps/l4d2center/update", post(update_l4d2center_handler))
         .route("/api/maps/discover", post(discover_handler))
         .route("/api/maps/compact", post(compact_handler))
+        .route("/api/maps/updates/available", get(list_available_updates_handler))
         .route("/api/maps", get(list_maps_handler))
         .route(
             "/api/maps/{id}",

@@ -17,6 +17,10 @@ impl Config {
             anyhow::bail!("sync_interval_secs must be greater than 0");
         }
 
+        if self.map_update_check_interval_days == 0 {
+            anyhow::bail!("map_update_check_interval_days must be at least 1");
+        }
+
         if !ALLOWED_LOG_LEVELS.contains(&self.log_level.to_lowercase().as_str()) {
             anyhow::bail!(
                 "Invalid log_level '{}', expected one of: {}",

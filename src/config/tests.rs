@@ -32,6 +32,11 @@ fn test_default_config() {
     );
     assert!(config.hidden_workshop_ids.is_empty());
     assert!(config.hidden_map_ids.is_empty());
+    assert_eq!(config.map_update_check_interval_days, 3);
+    assert!(config.workshop_update_check_enabled);
+    assert!(config.workshop_update_auto_apply);
+    assert!(config.l4d2center_update_check_enabled);
+    assert!(!config.l4d2center_update_auto_apply);
 }
 
 #[test]
@@ -183,6 +188,27 @@ fn test_env_var_overrides() {
                 assert_eq!(config.log_level, "trace");
             },
         },
+        Case {
+            key: keys::MAP_UPDATE_CHECK_INTERVAL_DAYS,
+            value: "5",
+            assert: |config| {
+                assert_eq!(config.map_update_check_interval_days, 5);
+            },
+        },
+        Case {
+            key: keys::WORKSHOP_UPDATE_AUTO_APPLY,
+            value: "false",
+            assert: |config| {
+                assert!(!config.workshop_update_auto_apply);
+            },
+        },
+        Case {
+            key: keys::L4D2CENTER_UPDATE_AUTO_APPLY,
+            value: "true",
+            assert: |config| {
+                assert!(config.l4d2center_update_auto_apply);
+            },
+        },
     ];
 
     for case in cases {
@@ -199,6 +225,13 @@ fn test_env_var_overrides() {
 fn test_validate_rejects_zero_sync_interval() {
     let (mut config, _dir) = crate::test_helpers::create_test_config();
     config.sync_interval_secs = 0;
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn test_validate_rejects_zero_map_update_interval_days() {
+    let (mut config, _dir) = crate::test_helpers::create_test_config();
+    config.map_update_check_interval_days = 0;
     assert!(config.validate().is_err());
 }
 
@@ -240,14 +273,23 @@ fn test_diff_classifies_live_and_restart_fields() {
     new.hidden_workshop_ids = vec![1];
     new.sync_interval_secs = 120;
     new.backend_api_key = Some("rotated-key".to_string());
+    new.map_update_check_interval_days = 7;
+    new.workshop_update_auto_apply = false;
     new.local_api_bind = SocketAddr::from_str("127.0.0.1:9090").unwrap();
 
     let change = old.diff(&new);
     assert!(change.live_applied.contains(&"hidden_workshop_ids"));
     assert!(change.live_applied.contains(&"sync_interval_secs"));
     assert!(change.live_applied.contains(&"backend_api_key"));
+    assert!(change.live_applied.contains(&"map_update_check_interval_days"));
+    assert!(change.live_applied.contains(&"workshop_update_auto_apply"));
     assert!(change.requires_restart.contains(&"local_api_bind"));
     assert!(!change.unchanged);
+
+    let merged = old.with_live_fields_from(&new);
+    assert_eq!(merged.map_update_check_interval_days, 7);
+    assert!(!merged.workshop_update_auto_apply);
+    assert_eq!(merged.local_api_bind, old.local_api_bind);
 }
 
 #[test]

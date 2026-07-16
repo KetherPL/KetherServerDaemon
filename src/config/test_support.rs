@@ -28,6 +28,12 @@ pub fn clear_kether_env_vars() {
     remove_env_var(keys::MAX_DOWNLOAD_SIZE_BYTES);
     remove_env_var(keys::MAX_EXTRACTION_SIZE_BYTES);
     remove_env_var(keys::MAX_EXTRACTION_FILE_COUNT);
+    remove_env_var(keys::L4D2CENTER_INDEX_URL);
+    remove_env_var(keys::MAP_UPDATE_CHECK_INTERVAL_DAYS);
+    remove_env_var(keys::WORKSHOP_UPDATE_CHECK_ENABLED);
+    remove_env_var(keys::WORKSHOP_UPDATE_AUTO_APPLY);
+    remove_env_var(keys::L4D2CENTER_UPDATE_CHECK_ENABLED);
+    remove_env_var(keys::L4D2CENTER_UPDATE_AUTO_APPLY);
 }
 
 /// Run a closure with a single env var set, restoring prior value afterward.

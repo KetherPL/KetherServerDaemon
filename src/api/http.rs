@@ -7,7 +7,7 @@ use tracing::info;
 use crate::api::handlers::ApiHandlers;
 use crate::api::routes;
 use crate::config::ConfigHandle;
-use crate::map_installer::MapInstallationService;
+use crate::map_installer::{MapInstallationService, PendingUpdatesState};
 use crate::registry::Registry;
 
 pub struct HttpServer {
@@ -21,9 +21,10 @@ impl HttpServer {
         installer: Arc<MapInstallationService>,
         addr: SocketAddr,
         config: ConfigHandle,
+        pending_updates: PendingUpdatesState,
     ) -> Self {
         Self {
-            handlers: ApiHandlers::new(registry, installer, config),
+            handlers: ApiHandlers::new(registry, installer, config, pending_updates),
             addr,
         }
     }
@@ -262,5 +263,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_available_updates_endpoint_returns_cached_list() {
+        use crate::api::handlers::ApiHandlers;
+        use crate::config::init_handle;
+        use crate::map_installer::{AvailableMapUpdate, MapInstallationService, PendingUpdatesState};
+        use crate::registry::SourceKind;
+        use crate::test_helpers;
+
+        let (registry, dirs) = test_helpers::setup_test_dirs().await.unwrap();
+        let paths = dirs.service_paths();
+        let installer = Arc::new(
+            MapInstallationService::new(
+                Arc::clone(&registry),
+                paths.addons_dir,
+                paths.download_dir,
+                100 * 1024 * 1024,
+                1024 * 1024 * 1024,
+                10000,
+            )
+            .await
+            .unwrap(),
+        );
+        let pending = PendingUpdatesState::new();
+        pending.replace_for_source(
+            SourceKind::Workshop,
+            vec![AvailableMapUpdate {
+                name: "Campaign Foo".to_string(),
+                map_id: 12,
+                source_kind: SourceKind::Workshop,
+                workshop_id: Some(123456),
+            }],
+        );
+        let handlers = Arc::new(ApiHandlers::new(
+            registry,
+            installer,
+            init_handle(Config::default()),
+            pending,
+        ));
+        let app = HttpServer::router(handlers);
+        let response = app
+            .oneshot(
+                Request::get("/api/maps/updates/available")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: ApiResponse<Vec<AvailableMapUpdate>> = serde_json::from_slice(&body).unwrap();
+        assert!(parsed.success);
+        let data = parsed.data.unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].map_id, 12);
+        assert_eq!(data[0].name, "Campaign Foo");
+        assert_eq!(data[0].source_kind, SourceKind::Workshop);
+        let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(raw["data"][0].get("workshop_id").is_none());
     }
 }

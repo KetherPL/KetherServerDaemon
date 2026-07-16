@@ -13,7 +13,7 @@ use axum::Json;
 use crate::api::error::ApiError;
 use crate::api::response::ApiResponse;
 use crate::config::{read_config, ConfigHandle};
-use crate::map_installer::MapInstallationService;
+use crate::map_installer::{MapInstallationService, PendingUpdatesState};
 use crate::maps_denylist::Mapsdenylist;
 use crate::registry::Registry;
 
@@ -21,6 +21,7 @@ pub struct ApiHandlers {
     pub(super) registry: Arc<dyn Registry>,
     pub(super) installer: Arc<MapInstallationService>,
     pub(super) config: ConfigHandle,
+    pub(super) pending_updates: PendingUpdatesState,
 }
 
 impl ApiHandlers {
@@ -28,11 +29,13 @@ impl ApiHandlers {
         registry: Arc<dyn Registry>,
         installer: Arc<MapInstallationService>,
         config: ConfigHandle,
+        pending_updates: PendingUpdatesState,
     ) -> Self {
         Self {
             registry,
             installer,
             config,
+            pending_updates,
         }
     }
 

@@ -26,11 +26,11 @@ use tracing::{debug, error, info, warn};
 
 use config::{init_handle, read_config, Config};
 use logging::setup_logging;
-use registry::{JsonRegistry, Registry};
+use registry::{JsonRegistry, Registry, SourceKind};
 use sync::{BackendSyncService, SyncService};
 use watcher::{InotifyWatcher, PendingEntry, Watcher, schedule_pending, should_force_sync};
 use api::HttpServer;
-use map_installer::{is_watched_map_path, MapInstallationService};
+use map_installer::{is_watched_map_path, MapInstallationService, PendingUpdatesState};
 use maps_denylist::Mapsdenylist;
 use repl::{DaemonCommand, start_key_listener};
 
@@ -49,6 +49,26 @@ enum WatcherWork {
 
 fn read_denylist(handle: &config::ConfigHandle) -> Mapsdenylist {
     Mapsdenylist::from_config(&read_config(handle))
+}
+
+fn notify_console_updates(source: &str, updates: &[map_installer::AvailableMapUpdate]) {
+    println!("Map updates available ({source}): {}", updates.len());
+    for item in updates {
+        if let Some(workshop_id) = item.workshop_id {
+            println!(
+                "  - #{} \"{}\" (workshop {workshop_id})",
+                item.map_id, item.name
+            );
+        } else {
+            println!("  - #{} \"{}\"", item.map_id, item.name);
+        }
+    }
+    println!("GET /api/maps/updates/available for machine-readable list.");
+    info!(
+        source,
+        count = updates.len(),
+        "Map updates available (auto-apply disabled)"
+    );
 }
 
 async fn cleanup_download_temp_dir(temp_dir: &std::path::Path) {
@@ -459,6 +479,170 @@ async fn main() -> anyhow::Result<()> {
             installer_steam_health.steam_health_check().await;
         }
     });
+
+    let pending_updates = PendingUpdatesState::new();
+    let installer_map_update = Arc::clone(&installer);
+    let map_update_config_handle = config_handle.clone();
+    let pending_updates_task = pending_updates.clone();
+    let map_update_task = tokio::spawn(async move {
+        info!("Periodic map update check task started");
+        let mut interval_days = read_config(&map_update_config_handle).map_update_check_interval_days;
+        let period = Duration::from_secs(interval_days.saturating_mul(86_400));
+        // First check after one full interval so restarts do not hammer Steam/CDN.
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+
+            let current = read_config(&map_update_config_handle);
+            if current.map_update_check_interval_days != interval_days {
+                interval_days = current.map_update_check_interval_days.max(1);
+                let period = Duration::from_secs(interval_days.saturating_mul(86_400));
+                interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            }
+
+            if !current.workshop_update_check_enabled && !current.l4d2center_update_check_enabled {
+                pending_updates_task.replace_for_source(SourceKind::Workshop, vec![]);
+                pending_updates_task.replace_for_source(SourceKind::L4d2Center, vec![]);
+                continue;
+            }
+
+            if current.workshop_update_check_enabled {
+                match installer_map_update
+                    .update_workshop_maps(None, false, true)
+                    .await
+                {
+                    Ok(report) => {
+                        let available: Vec<_> = report
+                            .available
+                            .iter()
+                            .map(|item| map_installer::AvailableMapUpdate {
+                                name: item.map.name.clone(),
+                                map_id: item.map.id,
+                                source_kind: SourceKind::Workshop,
+                                workshop_id: Some(item.workshop_id),
+                            })
+                            .collect();
+                        pending_updates_task
+                            .replace_for_source(SourceKind::Workshop, available.clone());
+
+                        if !available.is_empty() {
+                            if current.workshop_update_auto_apply {
+                                info!(
+                                    count = available.len(),
+                                    "Applying available workshop map updates"
+                                );
+                                match installer_map_update
+                                    .update_workshop_maps(None, false, false)
+                                    .await
+                                {
+                                    Ok(apply_report) => {
+                                        let applied: Vec<u64> = apply_report
+                                            .updated
+                                            .iter()
+                                            .map(|m| m.id)
+                                            .collect();
+                                        pending_updates_task.remove_map_ids(&applied);
+                                        for failure in &apply_report.failed {
+                                            error!(
+                                                map_id = failure.map_id,
+                                                error = %failure.error,
+                                                "Failed to auto-apply workshop update"
+                                            );
+                                        }
+                                        info!(
+                                            updated = apply_report.updated.len(),
+                                            failed = apply_report.failed.len(),
+                                            "Workshop auto-apply finished"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        error!(error = %e, "Workshop auto-apply failed");
+                                    }
+                                }
+                            } else {
+                                notify_console_updates("workshop", &available);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Periodic workshop update check failed");
+                    }
+                }
+            } else {
+                pending_updates_task.replace_for_source(SourceKind::Workshop, vec![]);
+            }
+
+            if current.l4d2center_update_check_enabled {
+                let index_url = current.l4d2center_index_url.clone();
+                match installer_map_update
+                    .update_l4d2center_maps(&index_url, None, None, false, true)
+                    .await
+                {
+                    Ok(report) => {
+                        let available: Vec<_> = report
+                            .available
+                            .iter()
+                            .map(|item| map_installer::AvailableMapUpdate {
+                                name: item.name.clone(),
+                                map_id: item.map_id,
+                                source_kind: SourceKind::L4d2Center,
+                                workshop_id: None,
+                            })
+                            .collect();
+                        pending_updates_task
+                            .replace_for_source(SourceKind::L4d2Center, available.clone());
+
+                        if !available.is_empty() {
+                            if current.l4d2center_update_auto_apply {
+                                info!(
+                                    count = available.len(),
+                                    "Applying available L4D2Center map updates"
+                                );
+                                match installer_map_update
+                                    .update_l4d2center_maps(&index_url, None, None, false, false)
+                                    .await
+                                {
+                                    Ok(apply_report) => {
+                                        let applied: Vec<u64> = apply_report
+                                            .updated
+                                            .iter()
+                                            .map(|m| m.id)
+                                            .collect();
+                                        pending_updates_task.remove_map_ids(&applied);
+                                        for failure in &apply_report.failed {
+                                            error!(
+                                                map_id = failure.map_id,
+                                                error = %failure.error,
+                                                "Failed to auto-apply L4D2Center update"
+                                            );
+                                        }
+                                        info!(
+                                            updated = apply_report.updated.len(),
+                                            failed = apply_report.failed.len(),
+                                            "L4D2Center auto-apply finished"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        error!(error = %e, "L4D2Center auto-apply failed");
+                                    }
+                                }
+                            } else {
+                                notify_console_updates("l4d2center", &available);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Periodic L4D2Center update check failed");
+                    }
+                }
+            } else {
+                pending_updates_task.replace_for_source(SourceKind::L4d2Center, vec![]);
+            }
+        }
+    });
     
     // Start HTTP server
     let registry_http = Arc::clone(&registry);
@@ -470,6 +654,7 @@ async fn main() -> anyhow::Result<()> {
         installer_http,
         http_addr,
         http_config_handle,
+        pending_updates,
     );
     let http_task = tokio::spawn(async move {
         if let Err(e) = http_server.serve().await {
@@ -515,6 +700,7 @@ async fn main() -> anyhow::Result<()> {
     watcher_worker.abort();
     sync_task.abort();
     steam_health_task.abort();
+    map_update_task.abort();
     http_task.abort();
     repl_task.abort();
     

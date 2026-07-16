@@ -51,6 +51,26 @@ pub struct Config {
     /// Daemon registry map IDs hidden from website API and backend sync
     #[serde(default)]
     pub hidden_map_ids: Vec<u64>,
+
+    /// Shared interval (days) between periodic workshop / L4D2Center update checks
+    #[serde(default = "default_map_update_check_interval_days")]
+    pub map_update_check_interval_days: u64,
+
+    /// Periodically check Steam Workshop maps for newer versions
+    #[serde(default = "default_true")]
+    pub workshop_update_check_enabled: bool,
+
+    /// Automatically download and apply workshop updates found by periodic checks
+    #[serde(default = "default_true")]
+    pub workshop_update_auto_apply: bool,
+
+    /// Periodically check L4D2Center maps against the catalog
+    #[serde(default = "default_true")]
+    pub l4d2center_update_check_enabled: bool,
+
+    /// Automatically download and apply L4D2Center updates found by periodic checks
+    #[serde(default = "default_false")]
+    pub l4d2center_update_auto_apply: bool,
 }
 
 fn default_max_download_size() -> u64 {
@@ -69,6 +89,18 @@ fn default_l4d2center_index_url() -> String {
     "https://l4d2center.com/maps/servers/index.json".to_string()
 }
 
+fn default_map_update_check_interval_days() -> u64 {
+    3
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_false() -> bool {
+    false
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -85,6 +117,11 @@ impl Default for Config {
             l4d2center_index_url: default_l4d2center_index_url(),
             hidden_workshop_ids: Vec::new(),
             hidden_map_ids: Vec::new(),
+            map_update_check_interval_days: default_map_update_check_interval_days(),
+            workshop_update_check_enabled: true,
+            workshop_update_auto_apply: true,
+            l4d2center_update_check_enabled: true,
+            l4d2center_update_auto_apply: false,
         }
     }
 }
@@ -136,6 +173,18 @@ l4d2center_index_url = "{}"
 # Maps hidden from website (still installed on server, visible in REPL)
 hidden_workshop_ids = []
 hidden_map_ids = []
+
+# Periodic map update checks (first check runs after one full interval from startup)
+# Shared cadence in days for workshop and L4D2Center checks
+map_update_check_interval_days = {}
+
+# Steam Workshop: check for newer versions; auto-apply downloads when enabled
+workshop_update_check_enabled = {}
+workshop_update_auto_apply = {}
+
+# L4D2Center: check catalog MD5; auto-apply is off by default
+l4d2center_update_check_enabled = {}
+l4d2center_update_auto_apply = {}
 "#,
             defaults.l4d2_server_dir.display(),
             defaults.registry_path.display(),
@@ -147,6 +196,11 @@ hidden_map_ids = []
             defaults.max_extraction_size_bytes,
             defaults.max_extraction_file_count,
             defaults.l4d2center_index_url,
+            defaults.map_update_check_interval_days,
+            defaults.workshop_update_check_enabled,
+            defaults.workshop_update_auto_apply,
+            defaults.l4d2center_update_check_enabled,
+            defaults.l4d2center_update_auto_apply,
         )
     }
 }

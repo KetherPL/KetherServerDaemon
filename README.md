@@ -32,6 +32,12 @@ Configuration is loaded from `config.toml` (or path in `KETHER_CONFIG`). If the 
 | `KETHER_MAX_DOWNLOAD_SIZE_BYTES` | Max download size (default 1GB) |
 | `KETHER_MAX_EXTRACTION_SIZE_BYTES` | Max ZIP extraction size |
 | `KETHER_MAX_EXTRACTION_FILE_COUNT` | Max files per archive |
+| `KETHER_L4D2CENTER_INDEX_URL` | L4D2Center catalog index URL |
+| `KETHER_MAP_UPDATE_CHECK_INTERVAL_DAYS` | Shared workshop/L4D2Center update check interval in days (default `3`; first check waits one full interval after startup) |
+| `KETHER_WORKSHOP_UPDATE_CHECK_ENABLED` | Enable periodic workshop update checks (default `true`) |
+| `KETHER_WORKSHOP_UPDATE_AUTO_APPLY` | Auto-download workshop updates when found (default `true`) |
+| `KETHER_L4D2CENTER_UPDATE_CHECK_ENABLED` | Enable periodic L4D2Center update checks (default `true`) |
+| `KETHER_L4D2CENTER_UPDATE_AUTO_APPLY` | Auto-download L4D2Center updates when found (default `false`) |
 
 ## REPL commands
 
@@ -59,6 +65,7 @@ All `/api/*` routes require `Authorization: Bearer <backend_api_key>` when
 |--------|------|-------------|
 | GET | `/health` | Health check |
 | GET | `/api/maps` | List maps |
+| GET | `/api/maps/updates/available` | Pending workshop/L4D2Center updates from periodic checks |
 | GET | `/api/maps/{id}` | Get map |
 | PATCH | `/api/maps/{id}` | Modify map field |
 | POST | `/api/maps/install` | Install from URL or workshop ID |

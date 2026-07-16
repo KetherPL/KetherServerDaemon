@@ -52,6 +52,21 @@ impl Config {
         if self.backend_api_key != new.backend_api_key {
             change.live_applied.push("backend_api_key");
         }
+        if self.map_update_check_interval_days != new.map_update_check_interval_days {
+            change.live_applied.push("map_update_check_interval_days");
+        }
+        if self.workshop_update_check_enabled != new.workshop_update_check_enabled {
+            change.live_applied.push("workshop_update_check_enabled");
+        }
+        if self.workshop_update_auto_apply != new.workshop_update_auto_apply {
+            change.live_applied.push("workshop_update_auto_apply");
+        }
+        if self.l4d2center_update_check_enabled != new.l4d2center_update_check_enabled {
+            change.live_applied.push("l4d2center_update_check_enabled");
+        }
+        if self.l4d2center_update_auto_apply != new.l4d2center_update_auto_apply {
+            change.live_applied.push("l4d2center_update_auto_apply");
+        }
         if self.l4d2_server_dir != new.l4d2_server_dir {
             change.requires_restart.push("l4d2_server_dir");
         }
@@ -87,6 +102,11 @@ impl Config {
         merged.l4d2center_index_url = new.l4d2center_index_url.clone();
         merged.backend_api_url = new.backend_api_url.clone();
         merged.backend_api_key = new.backend_api_key.clone();
+        merged.map_update_check_interval_days = new.map_update_check_interval_days;
+        merged.workshop_update_check_enabled = new.workshop_update_check_enabled;
+        merged.workshop_update_auto_apply = new.workshop_update_auto_apply;
+        merged.l4d2center_update_check_enabled = new.l4d2center_update_check_enabled;
+        merged.l4d2center_update_auto_apply = new.l4d2center_update_auto_apply;
         merged
     }
 }
