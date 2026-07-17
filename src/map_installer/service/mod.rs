@@ -878,6 +878,8 @@ impl MapInstallationService {
         }
 
         self.registry.remove_map(map_id).await?;
+        self.pending_updates.remove_map_ids(&[map_id]);
+        self.active_updates.clear(map_id);
 
         info!(map_id = map_id, "Map uninstalled successfully");
         Ok(())

@@ -105,20 +105,25 @@ impl MapInstallationService {
 
             info!(map_id, workshop_id, "Updating outdated workshop map");
 
-            let _active = crate::map_installer::ActiveUpdateGuard::new(
+            let _download_permit = self
+                .download_semaphore
+                .acquire()
+                .await
+                .expect("download semaphore closed");
+
+            let Some(_active) = crate::map_installer::ActiveUpdateGuard::try_begin(
                 self.active_updates.clone(),
                 crate::map_installer::ActiveMapUpdate {
                     name: candidate.entry.name.clone(),
                     map_id,
                     source_kind: SourceKind::Workshop,
                 },
-            );
-
-            let _download_permit = self
-                .download_semaphore
-                .acquire()
-                .await
-                .expect("download semaphore closed");
+            ) else {
+                info!(map_id, "Skipping workshop update; already in progress");
+                report.skipped += 1;
+                continue;
+            };
+            self.pending_updates.remove_map_ids(&[map_id]);
 
             let downloaded = match self
                 .workshop_downloader

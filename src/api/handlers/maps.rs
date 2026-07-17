@@ -18,9 +18,19 @@ impl ApiHandlers {
     pub async fn list_available_updates(
         &self,
     ) -> Result<Json<ApiResponse<MapUpdatesStatus>>, ApiError> {
+        let in_progress = self.installer.active_updates().list();
+        let active_ids: std::collections::HashSet<u64> =
+            in_progress.iter().map(|u| u.map_id).collect();
+        let available = self
+            .installer
+            .pending_updates()
+            .list()
+            .into_iter()
+            .filter(|u| !active_ids.contains(&u.map_id))
+            .collect();
         Ok(ok_json(MapUpdatesStatus {
-            available: self.installer.pending_updates().list(),
-            in_progress: self.installer.active_updates().list(),
+            available,
+            in_progress,
         }))
     }
 

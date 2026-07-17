@@ -44,12 +44,30 @@ impl PendingUpdatesState {
     }
 
     /// Replace all entries for `source_kind` with `items` (may be empty to clear).
-    pub fn replace_for_source(&self, source_kind: SourceKind, items: Vec<AvailableMapUpdate>) {
+    /// Entries whose `map_id` is in `exclude_ids` are dropped (e.g. currently in progress).
+    pub fn replace_for_source(
+        &self,
+        source_kind: SourceKind,
+        items: Vec<AvailableMapUpdate>,
+    ) {
+        self.replace_for_source_excluding(source_kind, items, &[]);
+    }
+
+    pub fn replace_for_source_excluding(
+        &self,
+        source_kind: SourceKind,
+        items: Vec<AvailableMapUpdate>,
+        exclude_ids: &[u64],
+    ) {
         let mut guard = self.inner.write().expect("pending updates lock poisoned");
         guard
             .updates
             .retain(|u| u.source_kind != source_kind);
-        guard.updates.extend(items);
+        guard.updates.extend(
+            items
+                .into_iter()
+                .filter(|item| !exclude_ids.contains(&item.map_id)),
+        );
         guard.last_checked_at = Some(Utc::now());
     }
 
@@ -133,6 +151,19 @@ mod tests {
             vec![workshop("A", 1, 100), workshop("B", 2, 200)],
         );
         state.remove_map_ids(&[1]);
+        let list = state.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].map_id, 2);
+    }
+
+    #[test]
+    fn replace_for_source_excluding_drops_active_ids() {
+        let state = PendingUpdatesState::new();
+        state.replace_for_source_excluding(
+            SourceKind::Workshop,
+            vec![workshop("A", 1, 100), workshop("B", 2, 200)],
+            &[1],
+        );
         let list = state.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].map_id, 2);

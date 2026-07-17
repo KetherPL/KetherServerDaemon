@@ -189,20 +189,25 @@ impl MapInstallationService {
 
             info!(map_id, name = %index_entry.name, "Updating outdated L4D2Center map");
 
-            let _active = crate::map_installer::ActiveUpdateGuard::new(
+            let _download_permit = self
+                .download_semaphore
+                .acquire()
+                .await
+                .expect("download semaphore closed");
+
+            let Some(_active) = crate::map_installer::ActiveUpdateGuard::try_begin(
                 self.active_updates.clone(),
                 crate::map_installer::ActiveMapUpdate {
                     name: index_entry.name.clone(),
                     map_id,
                     source_kind: SourceKind::L4d2Center,
                 },
-            );
-
-            let _download_permit = self
-                .download_semaphore
-                .acquire()
-                .await
-                .expect("download semaphore closed");
+            ) else {
+                info!(map_id, "Skipping L4D2Center update; already in progress");
+                report.skipped += 1;
+                continue;
+            };
+            self.pending_updates.remove_map_ids(&[map_id]);
 
             let download_url = encode_download_url(&index_entry.download_link);
             let downloaded = match self.zip_downloader.download_zip(&download_url).await {

@@ -524,8 +524,12 @@ async fn main() -> anyhow::Result<()> {
                                 workshop_id: Some(item.workshop_id),
                             })
                             .collect();
-                        pending_updates_task
-                            .replace_for_source(SourceKind::Workshop, available.clone());
+                        let exclude = installer_map_update.active_updates().active_ids();
+                        pending_updates_task.replace_for_source_excluding(
+                            SourceKind::Workshop,
+                            available.clone(),
+                            &exclude,
+                        );
 
                         if !available.is_empty() {
                             if current.workshop_update_auto_apply {
@@ -538,12 +542,6 @@ async fn main() -> anyhow::Result<()> {
                                     .await
                                 {
                                     Ok(apply_report) => {
-                                        let applied: Vec<u64> = apply_report
-                                            .updated
-                                            .iter()
-                                            .map(|m| m.id)
-                                            .collect();
-                                        pending_updates_task.remove_map_ids(&applied);
                                         for failure in &apply_report.failed {
                                             error!(
                                                 map_id = failure.map_id,
@@ -591,8 +589,12 @@ async fn main() -> anyhow::Result<()> {
                                 workshop_id: None,
                             })
                             .collect();
-                        pending_updates_task
-                            .replace_for_source(SourceKind::L4d2Center, available.clone());
+                        let exclude = installer_map_update.active_updates().active_ids();
+                        pending_updates_task.replace_for_source_excluding(
+                            SourceKind::L4d2Center,
+                            available.clone(),
+                            &exclude,
+                        );
 
                         if !available.is_empty() {
                             if current.l4d2center_update_auto_apply {
@@ -605,12 +607,6 @@ async fn main() -> anyhow::Result<()> {
                                     .await
                                 {
                                     Ok(apply_report) => {
-                                        let applied: Vec<u64> = apply_report
-                                            .updated
-                                            .iter()
-                                            .map(|m| m.id)
-                                            .collect();
-                                        pending_updates_task.remove_map_ids(&applied);
                                         for failure in &apply_report.failed {
                                             error!(
                                                 map_id = failure.map_id,
