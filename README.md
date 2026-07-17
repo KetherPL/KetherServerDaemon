@@ -65,7 +65,7 @@ All `/api/*` routes require `Authorization: Bearer <backend_api_key>` when
 |--------|------|-------------|
 | GET | `/health` | Health check |
 | GET | `/api/maps` | List maps |
-| GET | `/api/maps/updates/available` | Pending workshop/L4D2Center updates from periodic checks |
+| GET | `/api/maps/updates/available` | Pending + in-progress updates (`{ available, in_progress }`) |
 | GET | `/api/maps/{id}` | Get map |
 | PATCH | `/api/maps/{id}` | Modify map field |
 | POST | `/api/maps/install` | Install from URL or workshop ID |

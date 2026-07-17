@@ -189,6 +189,15 @@ impl MapInstallationService {
 
             info!(map_id, name = %index_entry.name, "Updating outdated L4D2Center map");
 
+            let _active = crate::map_installer::ActiveUpdateGuard::new(
+                self.active_updates.clone(),
+                crate::map_installer::ActiveMapUpdate {
+                    name: index_entry.name.clone(),
+                    map_id,
+                    source_kind: SourceKind::L4d2Center,
+                },
+            );
+
             let _download_permit = self
                 .download_semaphore
                 .acquire()
@@ -211,7 +220,10 @@ impl MapInstallationService {
                 .replace_l4d2center_from_download(&entry, downloaded, &index_entry.md5)
                 .await
             {
-                Ok(updated) => report.updated.push(updated),
+                Ok(updated) => {
+                    self.pending_updates.remove_map_ids(&[map_id]);
+                    report.updated.push(updated);
+                }
                 Err(error) => {
                     report.failed.push(MapOperationFailure {
                         map_id,

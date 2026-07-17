@@ -30,7 +30,7 @@ use registry::{JsonRegistry, Registry, SourceKind};
 use sync::{BackendSyncService, SyncService};
 use watcher::{InotifyWatcher, PendingEntry, Watcher, schedule_pending, should_force_sync};
 use api::HttpServer;
-use map_installer::{is_watched_map_path, MapInstallationService, PendingUpdatesState};
+use map_installer::{is_watched_map_path, MapInstallationService};
 use maps_denylist::Mapsdenylist;
 use repl::{DaemonCommand, start_key_listener};
 
@@ -480,10 +480,9 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let pending_updates = PendingUpdatesState::new();
     let installer_map_update = Arc::clone(&installer);
     let map_update_config_handle = config_handle.clone();
-    let pending_updates_task = pending_updates.clone();
+    let pending_updates_task = installer.pending_updates();
     let map_update_task = tokio::spawn(async move {
         info!("Periodic map update check task started");
         let mut interval_days = read_config(&map_update_config_handle).map_update_check_interval_days;
@@ -654,7 +653,6 @@ async fn main() -> anyhow::Result<()> {
         installer_http,
         http_addr,
         http_config_handle,
-        pending_updates,
     );
     let http_task = tokio::spawn(async move {
         if let Err(e) = http_server.serve().await {

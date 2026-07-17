@@ -105,6 +105,15 @@ impl MapInstallationService {
 
             info!(map_id, workshop_id, "Updating outdated workshop map");
 
+            let _active = crate::map_installer::ActiveUpdateGuard::new(
+                self.active_updates.clone(),
+                crate::map_installer::ActiveMapUpdate {
+                    name: candidate.entry.name.clone(),
+                    map_id,
+                    source_kind: SourceKind::Workshop,
+                },
+            );
+
             let _download_permit = self
                 .download_semaphore
                 .acquire()
@@ -136,7 +145,10 @@ impl MapInstallationService {
                 .replace_installed_from_download(&candidate.entry, downloaded, steam_updated)
                 .await
             {
-                Ok(updated) => report.updated.push(updated),
+                Ok(updated) => {
+                    self.pending_updates.remove_map_ids(&[map_id]);
+                    report.updated.push(updated);
+                }
                 Err(error) => {
                     warn!(
                         map_id,

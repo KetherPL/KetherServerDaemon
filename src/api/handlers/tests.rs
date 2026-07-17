@@ -277,7 +277,6 @@ async fn test_list_maps_excludes_denylisted() {
         Arc::clone(&registry),
         installer,
         config_handle,
-        crate::map_installer::PendingUpdatesState::new(),
     ));
 
     let response = handlers.list_maps().await.unwrap();
@@ -352,7 +351,6 @@ hidden_map_ids = []
         Arc::clone(&registry),
         installer,
         config_handle.clone(),
-        crate::map_installer::PendingUpdatesState::new(),
     ));
 
     let hidden = handlers.list_maps().await.unwrap();
@@ -512,12 +510,7 @@ async fn test_get_map_hides_denylisted() {
 
     let mut config = crate::config::Config::default();
     config.hidden_map_ids = vec![hidden_id];
-    let handlers = ApiHandlers::new(
-        registry,
-        installer,
-        init_handle(config),
-        crate::map_installer::PendingUpdatesState::new(),
-    );
+    let handlers = ApiHandlers::new(registry, installer, init_handle(config));
 
     let result = handlers.get_map(Path(hidden_id.to_string())).await;
     assert_eq!(

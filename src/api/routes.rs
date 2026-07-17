@@ -15,7 +15,7 @@ use crate::api::types::{
 };
 use crate::catalog::L4d2CenterCatalogEntry;
 use crate::map_installer::{
-    AvailableMapUpdate, CompactReport, DiscoveryReport, L4d2CenterUpdateReport, WorkshopUpdateReport,
+    CompactReport, DiscoveryReport, L4d2CenterUpdateReport, MapUpdatesStatus, WorkshopUpdateReport,
 };
 use crate::registry::MapEntry;
 
@@ -31,7 +31,7 @@ pub async fn list_maps_handler(
 
 pub async fn list_available_updates_handler(
     axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
-) -> Result<Json<ApiResponse<Vec<AvailableMapUpdate>>>, ApiError> {
+) -> Result<Json<ApiResponse<MapUpdatesStatus>>, ApiError> {
     handlers.list_available_updates().await
 }
 

@@ -6,6 +6,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{info, warn};
 
 use crate::map_installer::helpers::{source_kind_from_url, workshop_source_url};
+use crate::map_installer::{ActiveUpdatesState, PendingUpdatesState};
 use crate::downloader::{
     steam::steam_time_to_utc,
     workshop::WorkshopDownloader,
@@ -28,6 +29,8 @@ pub struct MapInstallationService {
     pub(super) op_lock: Mutex<()>,
     /// Caps concurrent heavy download/install work before op_lock is taken.
     pub(super) download_semaphore: Semaphore,
+    pub(super) pending_updates: PendingUpdatesState,
+    pub(super) active_updates: ActiveUpdatesState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,7 +134,17 @@ impl MapInstallationService {
             temp_dir,
             op_lock: Mutex::new(()),
             download_semaphore: Semaphore::new(2),
+            pending_updates: PendingUpdatesState::new(),
+            active_updates: ActiveUpdatesState::new(),
         })
+    }
+
+    pub fn pending_updates(&self) -> PendingUpdatesState {
+        self.pending_updates.clone()
+    }
+
+    pub fn active_updates(&self) -> ActiveUpdatesState {
+        self.active_updates.clone()
     }
     
     /// Install a map from a URL or workshop ID

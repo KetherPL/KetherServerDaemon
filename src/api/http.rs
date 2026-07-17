@@ -7,7 +7,7 @@ use tracing::info;
 use crate::api::handlers::ApiHandlers;
 use crate::api::routes;
 use crate::config::ConfigHandle;
-use crate::map_installer::{MapInstallationService, PendingUpdatesState};
+use crate::map_installer::MapInstallationService;
 use crate::registry::Registry;
 
 pub struct HttpServer {
@@ -21,10 +21,9 @@ impl HttpServer {
         installer: Arc<MapInstallationService>,
         addr: SocketAddr,
         config: ConfigHandle,
-        pending_updates: PendingUpdatesState,
     ) -> Self {
         Self {
-            handlers: ApiHandlers::new(registry, installer, config, pending_updates),
+            handlers: ApiHandlers::new(registry, installer, config),
             addr,
         }
     }
@@ -269,7 +268,9 @@ mod tests {
     async fn test_available_updates_endpoint_returns_cached_list() {
         use crate::api::handlers::ApiHandlers;
         use crate::config::init_handle;
-        use crate::map_installer::{AvailableMapUpdate, MapInstallationService, PendingUpdatesState};
+        use crate::map_installer::{
+            ActiveMapUpdate, AvailableMapUpdate, MapInstallationService, MapUpdatesStatus,
+        };
         use crate::registry::SourceKind;
         use crate::test_helpers;
 
@@ -287,8 +288,7 @@ mod tests {
             .await
             .unwrap(),
         );
-        let pending = PendingUpdatesState::new();
-        pending.replace_for_source(
+        installer.pending_updates().replace_for_source(
             SourceKind::Workshop,
             vec![AvailableMapUpdate {
                 name: "Campaign Foo".to_string(),
@@ -297,11 +297,15 @@ mod tests {
                 workshop_id: Some(123456),
             }],
         );
+        installer.active_updates().mark_started(ActiveMapUpdate {
+            name: "Updating Bar".to_string(),
+            map_id: 99,
+            source_kind: SourceKind::L4d2Center,
+        });
         let handlers = Arc::new(ApiHandlers::new(
             registry,
             installer,
             init_handle(Config::default()),
-            pending,
         ));
         let app = HttpServer::router(handlers);
         let response = app
@@ -316,14 +320,16 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let parsed: ApiResponse<Vec<AvailableMapUpdate>> = serde_json::from_slice(&body).unwrap();
+        let parsed: ApiResponse<MapUpdatesStatus> = serde_json::from_slice(&body).unwrap();
         assert!(parsed.success);
         let data = parsed.data.unwrap();
-        assert_eq!(data.len(), 1);
-        assert_eq!(data[0].map_id, 12);
-        assert_eq!(data[0].name, "Campaign Foo");
-        assert_eq!(data[0].source_kind, SourceKind::Workshop);
+        assert_eq!(data.available.len(), 1);
+        assert_eq!(data.available[0].map_id, 12);
+        assert_eq!(data.available[0].name, "Campaign Foo");
+        assert_eq!(data.available[0].source_kind, SourceKind::Workshop);
+        assert_eq!(data.in_progress.len(), 1);
+        assert_eq!(data.in_progress[0].map_id, 99);
         let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(raw["data"][0].get("workshop_id").is_none());
+        assert!(raw["data"]["available"][0].get("workshop_id").is_none());
     }
 }

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::registry::SourceKind;
 
+use super::active_updates::ActiveMapUpdate;
+
 /// Compact pending map update for REST clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvailableMapUpdate {
@@ -15,6 +17,13 @@ pub struct AvailableMapUpdate {
     /// Present for workshop entries; used for console notifications (not exposed in API JSON).
     #[serde(default, skip_serializing)]
     pub workshop_id: Option<u64>,
+}
+
+/// Combined pending + in-progress snapshot for REST clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapUpdatesStatus {
+    pub available: Vec<AvailableMapUpdate>,
+    pub in_progress: Vec<ActiveMapUpdate>,
 }
 
 #[derive(Debug, Default, Clone)]

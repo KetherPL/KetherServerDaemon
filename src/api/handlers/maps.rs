@@ -8,7 +8,7 @@ use crate::api::response::ApiResponse;
 use crate::api::service_error::{classify_modify_error, classify_uninstall_error};
 use crate::api::types::{InstallMapRequest, ModifyMapRequest};
 use crate::api::validation::{parse_map_id, validate_install_request, validate_modify_request, InstallSource};
-use crate::map_installer::AvailableMapUpdate;
+use crate::map_installer::MapUpdatesStatus;
 use crate::registry::MapEntry;
 
 use super::helpers::{installer_internal_err, ok_json, registry_internal_err};
@@ -17,8 +17,11 @@ use super::ApiHandlers;
 impl ApiHandlers {
     pub async fn list_available_updates(
         &self,
-    ) -> Result<Json<ApiResponse<Vec<AvailableMapUpdate>>>, ApiError> {
-        Ok(ok_json(self.pending_updates.list()))
+    ) -> Result<Json<ApiResponse<MapUpdatesStatus>>, ApiError> {
+        Ok(ok_json(MapUpdatesStatus {
+            available: self.installer.pending_updates().list(),
+            in_progress: self.installer.active_updates().list(),
+        }))
     }
 
     pub async fn list_maps(
