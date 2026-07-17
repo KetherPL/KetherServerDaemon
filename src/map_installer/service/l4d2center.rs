@@ -218,7 +218,7 @@ impl MapInstallationService {
                         crate::map_installer::UpdateProgressPatch {
                             phase: Some(crate::map_installer::UpdatePhase::Downloading),
                             bytes_downloaded: Some(downloaded),
-                            bytes_total: Some(total),
+                            bytes_total: total.map(Some),
                             detail: None,
                         },
                     );

@@ -276,6 +276,19 @@ mod tests {
         assert_eq!(list[0].detail.as_deref(), Some("file.vpk"));
         assert_eq!(list[0].phase, UpdatePhase::Downloading);
 
+        // Progress without Content-Length must not clear a known total.
+        state.set_progress(
+            7,
+            UpdateProgressPatch {
+                phase: Some(UpdatePhase::Downloading),
+                bytes_downloaded: Some(75),
+                bytes_total: None,
+                detail: None,
+            },
+        );
+        assert_eq!(state.list()[0].bytes_total, Some(100));
+        assert_eq!(state.list()[0].percent, Some(75));
+
         state.set_progress(
             7,
             UpdateProgressPatch {
@@ -286,6 +299,6 @@ mod tests {
             },
         );
         assert_eq!(state.list()[0].phase, UpdatePhase::Installing);
-        assert_eq!(state.list()[0].percent, Some(50));
+        assert_eq!(state.list()[0].percent, Some(75));
     }
 }

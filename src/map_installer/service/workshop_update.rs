@@ -133,11 +133,27 @@ impl MapInstallationService {
                         crate::map_installer::UpdateProgressPatch {
                             phase: Some(crate::map_installer::UpdatePhase::Downloading),
                             bytes_downloaded: Some(downloaded),
-                            bytes_total: Some(total),
+                            // Only set total when Content-Length is known — do not clear a
+                            // file_size seed with Some(None).
+                            bytes_total: total.map(Some),
                             detail: None,
                         },
                     );
                 });
+
+            self.active_updates.set_progress(
+                map_id,
+                crate::map_installer::UpdateProgressPatch {
+                    phase: Some(crate::map_installer::UpdatePhase::Downloading),
+                    bytes_downloaded: Some(0),
+                    bytes_total: if detail.file_size > 0 {
+                        Some(Some(detail.file_size))
+                    } else {
+                        None
+                    },
+                    detail: None,
+                },
+            );
 
             let downloaded = match self
                 .workshop_downloader
