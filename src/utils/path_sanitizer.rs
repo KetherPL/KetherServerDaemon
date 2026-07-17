@@ -56,7 +56,11 @@ pub fn validate_path_within_base(path: &Path, base: &Path) -> Result<()> {
 /// Validate that a path is (or would be) within a base directory.
 ///
 /// Accepts either a path relative to `base`, or an absolute path that must
-/// lexically resolve under `base`. Does not require the target to exist.
+/// resolve under `base`. Does not require the target to exist.
+///
+/// When `base` is reached through a symlink, absolute paths built with
+/// `base.join(...)` are compared after canonicalization so lexical vs
+/// physical prefixes do not false-reject legitimate files.
 pub fn validate_path_within_base_new(path: &Path, base: &Path) -> Result<()> {
     let base_norm = if base.exists() {
         base.canonicalize()
@@ -65,11 +69,7 @@ pub fn validate_path_within_base_new(path: &Path, base: &Path) -> Result<()> {
         normalize_path(base)
     };
 
-    let candidate = if path.is_absolute() {
-        normalize_path(path)
-    } else {
-        normalize_path(&base.join(path))
-    };
+    let candidate = resolve_candidate_under_base(path, base, &base_norm)?;
 
     if has_parent_dir_component(&candidate) {
         return Err(anyhow::anyhow!(
@@ -99,6 +99,48 @@ pub fn validate_path_within_base_new(path: &Path, base: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_candidate_under_base(
+    path: &Path,
+    base: &Path,
+    base_norm: &Path,
+) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        return Ok(normalize_path(&base_norm.join(path)));
+    }
+
+    // Absolute path: prefer canonical form so symlink bases compare correctly.
+    if path.exists() {
+        return path
+            .canonicalize()
+            .context("Failed to canonicalize path");
+    }
+
+    if let Some(parent) = path.parent() {
+        if parent.as_os_str().is_empty() {
+            return Ok(normalize_path(path));
+        }
+        if parent.exists() {
+            let parent_canon = parent
+                .canonicalize()
+                .context("Failed to canonicalize parent path")?;
+            let file_name = path.file_name().ok_or_else(|| {
+                anyhow::anyhow!("Path {} has no file name", path.display())
+            })?;
+            return Ok(parent_canon.join(file_name));
+        }
+    }
+
+    // Lexical fallback: if `path` was built as `base.join(rel)`, re-root under
+    // the canonical base so symlink prefixes still match.
+    let base_lex = normalize_path(base);
+    let path_lex = normalize_path(path);
+    if let Ok(relative) = path_lex.strip_prefix(&base_lex) {
+        return Ok(base_norm.join(relative));
+    }
+
+    Ok(path_lex)
 }
 
 fn has_parent_dir_component(path: &Path) -> bool {
@@ -304,6 +346,20 @@ mod tests {
         let absolute = base.join("map.vpk");
 
         assert!(validate_path_within_base_new(&absolute, base).is_ok());
+    }
+
+    #[test]
+    fn test_validate_path_within_base_new_accepts_symlinked_base_join() {
+        let temp_dir = TempDir::new().unwrap();
+        let real_base = temp_dir.path().join("real_addons");
+        std::fs::create_dir(&real_base).unwrap();
+        let link_base = temp_dir.path().join("link_addons");
+        std::os::unix::fs::symlink(&real_base, &link_base).unwrap();
+
+        let absolute = link_base.join("map.vpk");
+        std::fs::write(&absolute, b"vpk").unwrap();
+
+        assert!(validate_path_within_base_new(&absolute, &link_base).is_ok());
     }
 
     #[test]
