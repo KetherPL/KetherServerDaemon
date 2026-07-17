@@ -113,11 +113,11 @@ impl MapInstallationService {
 
             let Some(_active) = crate::map_installer::ActiveUpdateGuard::try_begin(
                 self.active_updates.clone(),
-                crate::map_installer::ActiveMapUpdate {
-                    name: candidate.entry.name.clone(),
+                crate::map_installer::ActiveMapUpdate::new(
+                    candidate.entry.name.clone(),
                     map_id,
-                    source_kind: SourceKind::Workshop,
-                },
+                    SourceKind::Workshop,
+                ),
             ) else {
                 info!(map_id, "Skipping workshop update; already in progress");
                 report.skipped += 1;
@@ -125,9 +125,23 @@ impl MapInstallationService {
             };
             self.pending_updates.remove_map_ids(&[map_id]);
 
+            let progress_state = self.active_updates.clone();
+            let on_progress: crate::downloader::client::DownloadProgressCallback =
+                std::sync::Arc::new(move |downloaded, total| {
+                    progress_state.set_progress(
+                        map_id,
+                        crate::map_installer::UpdateProgressPatch {
+                            phase: Some(crate::map_installer::UpdatePhase::Downloading),
+                            bytes_downloaded: Some(downloaded),
+                            bytes_total: Some(total),
+                            detail: None,
+                        },
+                    );
+                });
+
             let downloaded = match self
                 .workshop_downloader
-                .download_from_details(detail)
+                .download_from_details_with_progress(detail, Some(on_progress))
                 .await
             {
                 Ok(path) => path,
@@ -145,6 +159,18 @@ impl MapInstallationService {
                     continue;
                 }
             };
+
+            if let Some(name) = downloaded.file_name().and_then(|n| n.to_str()) {
+                self.active_updates.set_progress(
+                    map_id,
+                    crate::map_installer::UpdateProgressPatch {
+                        phase: None,
+                        bytes_downloaded: None,
+                        bytes_total: None,
+                        detail: Some(Some(name.to_string())),
+                    },
+                );
+            }
 
             match self
                 .replace_installed_from_download(&candidate.entry, downloaded, steam_updated)
@@ -205,8 +231,26 @@ impl MapInstallationService {
         crate::utils::validate_path_within_base_new(&install_path, &self.addons_dir)
             .context("Attempted to update map outside of addons directory")?;
 
+        self.active_updates.set_progress(
+            existing.id,
+            crate::map_installer::UpdateProgressPatch {
+                phase: Some(crate::map_installer::UpdatePhase::Extracting),
+                bytes_downloaded: None,
+                bytes_total: None,
+                detail: None,
+            },
+        );
         let (source_vpk, temp_cleanup) = self.prepare_vpk_from_download(downloaded).await?;
 
+        self.active_updates.set_progress(
+            existing.id,
+            crate::map_installer::UpdateProgressPatch {
+                phase: Some(crate::map_installer::UpdatePhase::Installing),
+                bytes_downloaded: None,
+                bytes_total: None,
+                detail: None,
+            },
+        );
         let _guard = self.op_lock.lock().await;
 
         let backup_path = install_path.with_extension("vpk.bak");

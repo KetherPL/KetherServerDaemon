@@ -297,11 +297,11 @@ mod tests {
                 workshop_id: Some(123456),
             }],
         );
-        installer.active_updates().mark_started(ActiveMapUpdate {
-            name: "Updating Bar".to_string(),
-            map_id: 99,
-            source_kind: SourceKind::L4d2Center,
-        });
+        installer.active_updates().mark_started(ActiveMapUpdate::new(
+            "Updating Bar".to_string(),
+            99,
+            SourceKind::L4d2Center,
+        ));
         let handlers = Arc::new(ApiHandlers::new(
             registry,
             installer,
@@ -329,7 +329,15 @@ mod tests {
         assert_eq!(data.available[0].source_kind, SourceKind::Workshop);
         assert_eq!(data.in_progress.len(), 1);
         assert_eq!(data.in_progress[0].map_id, 99);
+        assert_eq!(
+            data.in_progress[0].phase,
+            crate::map_installer::UpdatePhase::Downloading
+        );
         let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(raw["data"]["available"][0].get("workshop_id").is_none());
+        assert_eq!(
+            raw["data"]["in_progress"][0]["phase"],
+            serde_json::json!("downloading")
+        );
     }
 }

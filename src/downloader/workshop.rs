@@ -175,6 +175,15 @@ impl WorkshopDownloader {
         &self,
         detail: &WorkshopFileDetails,
     ) -> anyhow::Result<PathBuf> {
+        self.download_from_details_with_progress(detail, None).await
+    }
+
+    /// Download a workshop item with optional byte-progress reporting.
+    pub async fn download_from_details_with_progress(
+        &self,
+        detail: &WorkshopFileDetails,
+        on_progress: Option<crate::downloader::client::DownloadProgressCallback>,
+    ) -> anyhow::Result<PathBuf> {
         let download_url = match self.resolve_download_url(detail).await? {
             Some(url) => url,
             None => {
@@ -185,7 +194,7 @@ impl WorkshopDownloader {
             }
         };
 
-        self.download_from_url(detail.workshop_id, &download_url)
+        self.download_from_url(detail.workshop_id, &download_url, on_progress)
             .await
     }
 
@@ -298,6 +307,7 @@ impl WorkshopDownloader {
         &self,
         workshop_id: u64,
         download_url: &str,
+        on_progress: Option<crate::downloader::client::DownloadProgressCallback>,
     ) -> anyhow::Result<PathBuf> {
         let filename = download_url
             .trim_end_matches('/')
@@ -327,7 +337,7 @@ impl WorkshopDownloader {
         );
         
         self.client
-            .download_with_retry(download_url, &output_path)
+            .download_with_retry_progress(download_url, &output_path, on_progress)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to download file: {}", e))?;
         

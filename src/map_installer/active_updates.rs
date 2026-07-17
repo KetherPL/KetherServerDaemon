@@ -5,12 +5,80 @@ use serde::{Deserialize, Serialize};
 
 use crate::registry::SourceKind;
 
+/// High-level phase of an in-flight map update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePhase {
+    #[default]
+    Downloading,
+    Extracting,
+    Installing,
+}
+
+/// Live progress fields for an active map update.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateProgressPatch {
+    pub phase: Option<UpdatePhase>,
+    pub bytes_downloaded: Option<u64>,
+    pub bytes_total: Option<Option<u64>>,
+    pub detail: Option<Option<String>>,
+}
+
 /// Map currently being downloaded/replaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveMapUpdate {
     pub name: String,
     pub map_id: u64,
     pub source_kind: SourceKind,
+    pub phase: UpdatePhase,
+    pub bytes_downloaded: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ActiveMapUpdate {
+    pub fn new(name: String, map_id: u64, source_kind: SourceKind) -> Self {
+        Self {
+            name,
+            map_id,
+            source_kind,
+            phase: UpdatePhase::Downloading,
+            bytes_downloaded: 0,
+            bytes_total: None,
+            percent: None,
+            detail: None,
+        }
+    }
+
+    fn recompute_percent(&mut self) {
+        self.percent = match self.bytes_total {
+            Some(total) if total > 0 => {
+                let pct = ((self.bytes_downloaded as f64 / total as f64) * 100.0).floor() as u64;
+                Some(pct.min(100) as u8)
+            }
+            _ => None,
+        };
+    }
+
+    fn apply_progress(&mut self, patch: UpdateProgressPatch) {
+        if let Some(phase) = patch.phase {
+            self.phase = phase;
+        }
+        if let Some(downloaded) = patch.bytes_downloaded {
+            self.bytes_downloaded = downloaded;
+        }
+        if let Some(total) = patch.bytes_total {
+            self.bytes_total = total;
+        }
+        if let Some(detail) = patch.detail {
+            self.detail = detail;
+        }
+        self.recompute_percent();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +117,14 @@ impl ActiveUpdatesState {
         }
         guard.push(ActiveEntry { update, refs: 1 });
         true
+    }
+
+    /// Update progress fields for an active map (no refcount change).
+    pub fn set_progress(&self, map_id: u64, patch: UpdateProgressPatch) {
+        let mut guard = self.inner.write().expect("active updates lock poisoned");
+        if let Some(entry) = guard.iter_mut().find(|e| e.update.map_id == map_id) {
+            entry.update.apply_progress(patch);
+        }
     }
 
     pub fn mark_finished(&self, map_id: u64) {
@@ -126,16 +202,16 @@ mod tests {
     #[test]
     fn mark_and_finish_tracks_entries() {
         let state = ActiveUpdatesState::new();
-        state.mark_started(ActiveMapUpdate {
-            name: "A".to_string(),
-            map_id: 1,
-            source_kind: SourceKind::Workshop,
-        });
-        state.mark_started(ActiveMapUpdate {
-            name: "B".to_string(),
-            map_id: 2,
-            source_kind: SourceKind::L4d2Center,
-        });
+        state.mark_started(ActiveMapUpdate::new(
+            "A".to_string(),
+            1,
+            SourceKind::Workshop,
+        ));
+        state.mark_started(ActiveMapUpdate::new(
+            "B".to_string(),
+            2,
+            SourceKind::L4d2Center,
+        ));
         assert_eq!(state.list().len(), 2);
         state.mark_finished(1);
         let list = state.list();
@@ -146,11 +222,7 @@ mod tests {
     #[test]
     fn refcount_keeps_entry_until_last_finish() {
         let state = ActiveUpdatesState::new();
-        let update = ActiveMapUpdate {
-            name: "A".to_string(),
-            map_id: 7,
-            source_kind: SourceKind::Workshop,
-        };
+        let update = ActiveMapUpdate::new("A".to_string(), 7, SourceKind::Workshop);
         state.mark_started(update.clone());
         state.mark_started(update);
         assert_eq!(state.list().len(), 1);
@@ -166,24 +238,54 @@ mod tests {
         {
             let guard = ActiveUpdateGuard::try_begin(
                 state.clone(),
-                ActiveMapUpdate {
-                    name: "A".to_string(),
-                    map_id: 7,
-                    source_kind: SourceKind::Workshop,
-                },
+                ActiveMapUpdate::new("A".to_string(), 7, SourceKind::Workshop),
             );
             assert!(guard.is_some());
             assert_eq!(state.list().len(), 1);
             assert!(ActiveUpdateGuard::try_begin(
                 state.clone(),
-                ActiveMapUpdate {
-                    name: "A".to_string(),
-                    map_id: 7,
-                    source_kind: SourceKind::Workshop,
-                },
+                ActiveMapUpdate::new("A".to_string(), 7, SourceKind::Workshop),
             )
             .is_none());
         }
         assert!(state.list().is_empty());
+    }
+
+    #[test]
+    fn set_progress_updates_bytes_and_percent() {
+        let state = ActiveUpdatesState::new();
+        state.mark_started(ActiveMapUpdate::new(
+            "A".to_string(),
+            7,
+            SourceKind::Workshop,
+        ));
+        state.set_progress(
+            7,
+            UpdateProgressPatch {
+                phase: Some(UpdatePhase::Downloading),
+                bytes_downloaded: Some(50),
+                bytes_total: Some(Some(100)),
+                detail: Some(Some("file.vpk".to_string())),
+            },
+        );
+        let list = state.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].bytes_downloaded, 50);
+        assert_eq!(list[0].bytes_total, Some(100));
+        assert_eq!(list[0].percent, Some(50));
+        assert_eq!(list[0].detail.as_deref(), Some("file.vpk"));
+        assert_eq!(list[0].phase, UpdatePhase::Downloading);
+
+        state.set_progress(
+            7,
+            UpdateProgressPatch {
+                phase: Some(UpdatePhase::Installing),
+                bytes_downloaded: None,
+                bytes_total: None,
+                detail: None,
+            },
+        );
+        assert_eq!(state.list()[0].phase, UpdatePhase::Installing);
+        assert_eq!(state.list()[0].percent, Some(50));
     }
 }

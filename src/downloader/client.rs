@@ -2,12 +2,18 @@
 use reqwest::header::LOCATION;
 use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode, Url};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::utils::validate_url_resolved;
 
 const MAX_REDIRECTS: usize = 5;
+const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
+const PROGRESS_MIN_BYTES: u64 = 256 * 1024;
+
+/// Optional download progress hook: `(bytes_downloaded, content_length_hint)`.
+pub type DownloadProgressCallback = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
 
 pub struct HttpClient {
     client: Client,
@@ -58,10 +64,23 @@ impl HttpClient {
         url: &str,
         output_path: &std::path::Path,
     ) -> anyhow::Result<()> {
+        self.download_with_retry_progress(url, output_path, None)
+            .await
+    }
+
+    pub async fn download_with_retry_progress(
+        &self,
+        url: &str,
+        output_path: &std::path::Path,
+        on_progress: Option<DownloadProgressCallback>,
+    ) -> anyhow::Result<()> {
         let mut last_error = None;
 
         for attempt in 1..=self.max_retries {
-            match self.download_once(url, output_path).await {
+            match self
+                .download_once(url, output_path, on_progress.as_ref())
+                .await
+            {
                 Ok(()) => {
                     if attempt > 1 {
                         info!(url = %url, attempt, "Download succeeded after retry");
@@ -91,12 +110,14 @@ impl HttpClient {
         &self,
         url: &str,
         output_path: &std::path::Path,
+        on_progress: Option<&DownloadProgressCallback>,
     ) -> anyhow::Result<()> {
         info!(url = %url, path = %output_path.display(), "Starting download");
 
         let response = self.send_validated(url).await?;
 
-        if let Some(content_length) = response.content_length()
+        let content_length = response.content_length();
+        if let Some(content_length) = content_length
             && content_length > self.max_download_size
         {
             return Err(anyhow::anyhow!(
@@ -111,7 +132,15 @@ impl HttpClient {
 
         let mut stream = response.bytes_stream();
         let mut downloaded: u64 = 0;
+        let mut last_report_at = Instant::now()
+            .checked_sub(PROGRESS_MIN_INTERVAL)
+            .unwrap_or_else(Instant::now);
+        let mut last_report_bytes: u64 = 0;
         let mut file = tokio::fs::File::create(output_path).await?;
+
+        if let Some(cb) = on_progress {
+            cb(0, content_length);
+        }
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -144,6 +173,17 @@ impl HttpClient {
                     error
                 ));
             }
+
+            if let Some(cb) = on_progress {
+                let bytes_delta = downloaded.saturating_sub(last_report_bytes);
+                let due = last_report_at.elapsed() >= PROGRESS_MIN_INTERVAL
+                    || bytes_delta >= PROGRESS_MIN_BYTES;
+                if due {
+                    cb(downloaded, content_length);
+                    last_report_at = Instant::now();
+                    last_report_bytes = downloaded;
+                }
+            }
         }
 
         file.flush().await?;
@@ -151,6 +191,10 @@ impl HttpClient {
         if downloaded == 0 {
             let _ = tokio::fs::remove_file(output_path).await;
             return Err(anyhow::anyhow!("Download completed with 0 bytes"));
+        }
+
+        if let Some(cb) = on_progress {
+            cb(downloaded, content_length.or(Some(downloaded)));
         }
 
         info!(url = %url, path = %output_path.display(), size = downloaded, "Download completed");
@@ -290,6 +334,29 @@ mod tests {
 
         let content = std::fs::read_to_string(&output_path).unwrap();
         assert_eq!(content, "test file content");
+    }
+
+    #[tokio::test]
+    async fn test_download_reports_progress() {
+        let http = acquire_http_test_lock().await;
+        let client = HttpClient::new_insecure_for_tests(100 * 1024 * 1024).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("downloaded.zip");
+        let url = http.url("/test.zip");
+
+        let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(u64, Option<u64>)>::new()));
+        let reports_cb = reports.clone();
+        let on_progress: DownloadProgressCallback = std::sync::Arc::new(move |downloaded, total| {
+            reports_cb.lock().unwrap().push((downloaded, total));
+        });
+
+        let result = client
+            .download_with_retry_progress(&url, &output_path, Some(on_progress))
+            .await;
+        assert!(result.is_ok());
+        let captured = reports.lock().unwrap().clone();
+        assert!(!captured.is_empty());
+        assert_eq!(captured.last().unwrap().0, b"test file content".len() as u64);
     }
 
     #[tokio::test]

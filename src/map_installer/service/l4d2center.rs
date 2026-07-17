@@ -197,11 +197,11 @@ impl MapInstallationService {
 
             let Some(_active) = crate::map_installer::ActiveUpdateGuard::try_begin(
                 self.active_updates.clone(),
-                crate::map_installer::ActiveMapUpdate {
-                    name: index_entry.name.clone(),
+                crate::map_installer::ActiveMapUpdate::new(
+                    index_entry.name.clone(),
                     map_id,
-                    source_kind: SourceKind::L4d2Center,
-                },
+                    SourceKind::L4d2Center,
+                ),
             ) else {
                 info!(map_id, "Skipping L4D2Center update; already in progress");
                 report.skipped += 1;
@@ -210,7 +210,25 @@ impl MapInstallationService {
             self.pending_updates.remove_map_ids(&[map_id]);
 
             let download_url = encode_download_url(&index_entry.download_link);
-            let downloaded = match self.zip_downloader.download_zip(&download_url).await {
+            let progress_state = self.active_updates.clone();
+            let on_progress: crate::downloader::client::DownloadProgressCallback =
+                std::sync::Arc::new(move |downloaded, total| {
+                    progress_state.set_progress(
+                        map_id,
+                        crate::map_installer::UpdateProgressPatch {
+                            phase: Some(crate::map_installer::UpdatePhase::Downloading),
+                            bytes_downloaded: Some(downloaded),
+                            bytes_total: Some(total),
+                            detail: None,
+                        },
+                    );
+                });
+
+            let downloaded = match self
+                .zip_downloader
+                .download_zip_with_progress(&download_url, Some(on_progress))
+                .await
+            {
                 Ok(path) => path,
                 Err(error) => {
                     report.failed.push(MapOperationFailure {
@@ -220,6 +238,18 @@ impl MapInstallationService {
                     continue;
                 }
             };
+
+            if let Some(name) = downloaded.file_name().and_then(|n| n.to_str()) {
+                self.active_updates.set_progress(
+                    map_id,
+                    crate::map_installer::UpdateProgressPatch {
+                        phase: None,
+                        bytes_downloaded: None,
+                        bytes_total: None,
+                        detail: Some(Some(name.to_string())),
+                    },
+                );
+            }
 
             match self
                 .replace_l4d2center_from_download(&entry, downloaded, &index_entry.md5)
@@ -251,8 +281,26 @@ impl MapInstallationService {
         crate::utils::validate_path_within_base_new(&install_path, &self.addons_dir)
             .context("Attempted to update map outside of addons directory")?;
 
+        self.active_updates.set_progress(
+            existing.id,
+            crate::map_installer::UpdateProgressPatch {
+                phase: Some(crate::map_installer::UpdatePhase::Extracting),
+                bytes_downloaded: None,
+                bytes_total: None,
+                detail: None,
+            },
+        );
         let (source_vpk, temp_cleanup) = self.prepare_vpk_from_download(downloaded).await?;
 
+        self.active_updates.set_progress(
+            existing.id,
+            crate::map_installer::UpdateProgressPatch {
+                phase: Some(crate::map_installer::UpdatePhase::Installing),
+                bytes_downloaded: None,
+                bytes_total: None,
+                detail: None,
+            },
+        );
         let _guard = self.op_lock.lock().await;
 
         let backup_path = install_path.with_extension("vpk.bak");

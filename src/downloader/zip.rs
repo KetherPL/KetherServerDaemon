@@ -41,6 +41,17 @@ impl Downloader for ZipDownloader {
     }
     
     async fn download_zip(&self, url: &str) -> anyhow::Result<PathBuf> {
+        self.download_zip_with_progress(url, None).await
+    }
+}
+
+impl ZipDownloader {
+    /// Download a ZIP with optional byte-progress reporting.
+    pub async fn download_zip_with_progress(
+        &self,
+        url: &str,
+        on_progress: Option<crate::downloader::client::DownloadProgressCallback>,
+    ) -> anyhow::Result<PathBuf> {
         // Extract filename from URL and sanitize it
         let raw_filename = url
             .split('/')
@@ -61,7 +72,9 @@ impl Downloader for ZipDownloader {
         
         info!(url = %url, path = %output_path.display(), "Downloading ZIP file");
         
-        self.client.download_with_retry(url, &output_path).await?;
+        self.client
+            .download_with_retry_progress(url, &output_path, on_progress)
+            .await?;
         
         Ok(output_path)
     }
