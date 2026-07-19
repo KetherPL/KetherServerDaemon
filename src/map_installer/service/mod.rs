@@ -235,7 +235,9 @@ impl MapInstallationService {
             .workshop_downloader
             .download_from_details(detail)
             .await?;
-        
+
+        let name = name.or_else(|| detail.title.clone().filter(|t| !t.trim().is_empty()));
+
         let mut map_entry = self
             .install_downloaded_file(
                 downloaded_path,
@@ -380,19 +382,20 @@ impl MapInstallationService {
         
         // Extract metadata to get name and version
         let metadata = self.vpk_extractor.extract_vpk_metadata(vpk_path.clone()).await?;
+
+        let preferred_stem =
+            Self::preferred_vpk_stem(provided_name.as_deref(), &metadata.title);
         
         // Sanitize map name to prevent path traversal
         let raw_map_name = provided_name.unwrap_or_else(|| metadata.title.clone());
         let map_name = crate::utils::sanitize_map_name(&raw_map_name)
             .context("Invalid map name provided")?;
         
-        let vpk_filename = Self::resolve_vpk_filename(
+        let mut vpk_filename = Self::resolve_vpk_filename(
             expected_installed_filename.as_deref(),
+            preferred_stem.as_deref(),
             &vpk_path,
         );
-        
-        // Place VPK file directly in addons/ directory
-        let install_path = self.addons_dir.join(&vpk_filename);
 
         tokio::fs::create_dir_all(&self.addons_dir).await?;
 
@@ -422,11 +425,44 @@ impl MapInstallationService {
         }
 
         if let Some(existing) = self.find_map_by_installed_path(&vpk_filename).await? {
-            if let Err(e) = tokio::fs::remove_file(&vpk_path).await {
-                warn!(error = %e, path = %vpk_path.display(), "Failed to clean up downloaded file");
+            let same_workshop = match (resolved_workshop_id, existing.workshop_id) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
+            if same_workshop
+                || expected_installed_filename.is_some()
+                || preferred_stem.is_none()
+            {
+                if let Err(e) = tokio::fs::remove_file(&vpk_path).await {
+                    warn!(error = %e, path = %vpk_path.display(), "Failed to clean up downloaded file");
+                }
+                return Ok(existing);
             }
-            return Ok(existing);
+            // Preferred title path taken by a different map — use original basename.
+            let fallback = Self::resolve_vpk_filename(None, None, &vpk_path);
+            if fallback == vpk_filename {
+                if let Err(e) = tokio::fs::remove_file(&vpk_path).await {
+                    warn!(error = %e, path = %vpk_path.display(), "Failed to clean up downloaded file");
+                }
+                return Ok(existing);
+            }
+            if let Some(existing_fallback) =
+                self.find_map_by_installed_path(&fallback).await?
+            {
+                if let Err(e) = tokio::fs::remove_file(&vpk_path).await {
+                    warn!(error = %e, path = %vpk_path.display(), "Failed to clean up downloaded file");
+                }
+                return Ok(existing_fallback);
+            }
+            info!(
+                preferred = %vpk_filename,
+                fallback = %fallback,
+                "Preferred VPK filename taken; using original basename"
+            );
+            vpk_filename = fallback;
         }
+
+        let install_path = self.addons_dir.join(&vpk_filename);
 
         // Atomic install into addons directory
         crate::utils::atomic_replace_file(&vpk_path, &install_path)
@@ -613,15 +649,18 @@ impl MapInstallationService {
             .extract_vpk_metadata(source_vpk_path.clone())
             .await?;
 
+        let preferred_stem =
+            Self::preferred_vpk_stem(provided_name.as_deref(), &metadata.title);
+
         let raw_map_name = provided_name.unwrap_or_else(|| metadata.title.clone());
         let map_name = crate::utils::sanitize_map_name(&raw_map_name)
             .context("Invalid map name detected")?;
 
-        let vpk_filename = Self::resolve_vpk_filename(
+        let mut vpk_filename = Self::resolve_vpk_filename(
             expected_installed_filename.as_deref(),
+            preferred_stem.as_deref(),
             &source_vpk_path,
         );
-        let install_path = self.addons_dir.join(&vpk_filename);
 
         tokio::fs::create_dir_all(&self.addons_dir).await?;
 
@@ -653,10 +692,40 @@ impl MapInstallationService {
         }
 
         if let Some(existing) = self.find_map_by_installed_path(&vpk_filename).await? {
-            let _ = tokio::fs::remove_dir_all(&extract_temp).await;
-            let _ = tokio::fs::remove_file(&archive_path).await;
-            return Ok(existing);
+            let same_workshop = match (resolved_workshop_id, existing.workshop_id) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
+            if same_workshop
+                || expected_installed_filename.is_some()
+                || preferred_stem.is_none()
+            {
+                let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+                let _ = tokio::fs::remove_file(&archive_path).await;
+                return Ok(existing);
+            }
+            let fallback = Self::resolve_vpk_filename(None, None, &source_vpk_path);
+            if fallback == vpk_filename {
+                let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+                let _ = tokio::fs::remove_file(&archive_path).await;
+                return Ok(existing);
+            }
+            if let Some(existing_fallback) =
+                self.find_map_by_installed_path(&fallback).await?
+            {
+                let _ = tokio::fs::remove_dir_all(&extract_temp).await;
+                let _ = tokio::fs::remove_file(&archive_path).await;
+                return Ok(existing_fallback);
+            }
+            info!(
+                preferred = %vpk_filename,
+                fallback = %fallback,
+                "Preferred VPK filename taken; using original basename"
+            );
+            vpk_filename = fallback;
         }
+
+        let install_path = self.addons_dir.join(&vpk_filename);
 
         crate::utils::atomic_replace_file(&source_vpk_path, &install_path)
             .await
@@ -708,15 +777,44 @@ impl MapInstallationService {
         Ok(map_entry)
     }
 
-    fn resolve_vpk_filename(expected: Option<&str>, source_vpk_path: &Path) -> String {
-        let raw_vpk_filename = expected
+    fn preferred_vpk_stem(provided_name: Option<&str>, metadata_title: &str) -> Option<String> {
+        let raw = provided_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(str::to_string)
             .or_else(|| {
-                source_vpk_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(str::to_string)
-            })
+                let title = metadata_title.trim();
+                if title.is_empty() || title.eq_ignore_ascii_case("unknown") {
+                    None
+                } else {
+                    Some(title.to_string())
+                }
+            })?;
+        crate::utils::sanitize_map_name(&raw).ok()
+    }
+
+    fn resolve_vpk_filename(
+        expected: Option<&str>,
+        preferred_stem: Option<&str>,
+        source_vpk_path: &Path,
+    ) -> String {
+        if let Some(expected) = expected {
+            let vpk_filename = crate::utils::sanitize_filename(expected);
+            return if vpk_filename.ends_with(".vpk") {
+                vpk_filename
+            } else {
+                format!("{vpk_filename}.vpk")
+            };
+        }
+
+        if let Some(stem) = preferred_stem.map(str::trim).filter(|s| !s.is_empty()) {
+            return format!("{stem}.vpk");
+        }
+
+        let raw_vpk_filename = source_vpk_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
             .unwrap_or_else(|| "unknown.vpk".to_string());
         let vpk_filename = crate::utils::sanitize_filename(&raw_vpk_filename);
         if vpk_filename.ends_with(".vpk") {

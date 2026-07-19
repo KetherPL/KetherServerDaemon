@@ -779,3 +779,55 @@ async fn setup_test_service() -> (MapInstallationService, Arc<dyn Registry>, tes
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
+    #[test]
+    fn resolve_vpk_filename_prefers_title_over_uuid_basename() {
+        let source = PathBuf::from(
+            "a247bd11-15e7-427a-990a-85964ca65bab-9661ED51C9125DAE6B9CFDDC4F22F0AC46FC335F.vpk",
+        );
+        let name = MapInstallationService::resolve_vpk_filename(
+            None,
+            Some("dark_carnival_remix"),
+            &source,
+        );
+        assert_eq!(name, "dark_carnival_remix.vpk");
+    }
+
+    #[test]
+    fn resolve_vpk_filename_expected_wins_over_title() {
+        let source = PathBuf::from("uuid-hash.vpk");
+        let name = MapInstallationService::resolve_vpk_filename(
+            Some("catalog_campaign"),
+            Some("addon_title"),
+            &source,
+        );
+        assert_eq!(name, "catalog_campaign.vpk");
+    }
+
+    #[test]
+    fn resolve_vpk_filename_falls_back_when_title_missing() {
+        let source = PathBuf::from(
+            "a247bd11-15e7-427a-990a-85964ca65bab-9661ED51C9125DAE6B9CFDDC4F22F0AC46FC335F.vpk",
+        );
+        let name = MapInstallationService::resolve_vpk_filename(None, None, &source);
+        assert_eq!(
+            name,
+            "a247bd11-15e7-427a-990a-85964ca65bab-9661ED51C9125DAE6B9CFDDC4F22F0AC46FC335F.vpk"
+        );
+    }
+
+    #[test]
+    fn preferred_vpk_stem_skips_unknown_metadata_title() {
+        assert_eq!(
+            MapInstallationService::preferred_vpk_stem(None, "Unknown"),
+            None
+        );
+        assert_eq!(
+            MapInstallationService::preferred_vpk_stem(None, "My Cool Map"),
+            Some("my_cool_map".to_string())
+        );
+        assert_eq!(
+            MapInstallationService::preferred_vpk_stem(Some("API Name"), "Unknown"),
+            Some("api_name".to_string())
+        );
+    }
+

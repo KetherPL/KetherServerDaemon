@@ -66,6 +66,8 @@ pub struct WorkshopFileDetails {
     pub file_size: u64,
     /// Direct CDN URL when available (preferred over UFS hcontent lookup).
     pub file_url: Option<String>,
+    /// Workshop item title from Steam when available.
+    pub title: Option<String>,
 }
 
 fn parse_file_url(item: &steam_vent_proto_steam::steammessages_publishedfile_steamclient::PublishedFileDetails) -> Option<String> {
@@ -77,6 +79,18 @@ fn parse_file_url(item: &steam_vent_proto_steam::steammessages_publishedfile_ste
         None
     } else {
         Some(url)
+    }
+}
+
+fn parse_title(item: &steam_vent_proto_steam::steammessages_publishedfile_steamclient::PublishedFileDetails) -> Option<String> {
+    if !item.has_title() {
+        return None;
+    }
+    let title = item.title().trim().to_string();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
     }
 }
 
@@ -175,6 +189,7 @@ impl SteamConnection {
                 time_updated: item.time_updated(),
                 file_size: item.file_size(),
                 file_url,
+                title: parse_title(item),
             });
         }
 
