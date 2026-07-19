@@ -734,3 +734,48 @@ async fn setup_test_service() -> (MapInstallationService, Arc<dyn Registry>, tes
         assert_eq!(on_disk, payload);
     }
 
+    #[tokio::test]
+    async fn test_workshop_check_only_skips_non_workshop_md5() {
+        let (service, registry, dirs) = setup_test_service().await;
+
+        // Large-ish file that would be expensive to MD5 if resolve ran.
+        let rel = "l4d2center/big.vpk";
+        let path = dirs.addons_path().join(rel);
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        let chunk = vec![0u8; 256 * 1024];
+        let mut file = tokio::fs::File::create(&path).await.unwrap();
+        for _ in 0..8 {
+            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+                .await
+                .unwrap();
+        }
+        drop(file);
+
+        let map_entry = MapEntry {
+            id: 0,
+            name: "L4D2Center Map".to_string(),
+            source_url: "https://example.com/big.zip".to_string(),
+            source_kind: SourceKind::L4d2Center,
+            workshop_id: None,
+            installed_path: rel.to_string(),
+            installed_at: chrono::Utc::now(),
+            workshop_updated_at: None,
+            version: None,
+            checksum: None,
+            checksum_kind: None,
+        };
+        registry.add_map(map_entry).await.unwrap();
+
+        let started = std::time::Instant::now();
+        let report = service
+            .update_workshop_maps(None, false, true)
+            .await
+            .unwrap();
+        // Without the skip, MD5 of ~2MiB would still be fast locally, but we assert
+        // the map was classified as not_workshop without becoming a candidate.
+        assert_eq!(report.not_workshop, 1);
+        assert!(report.available.is_empty());
+        assert!(report.failed.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+

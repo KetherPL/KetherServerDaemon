@@ -340,4 +340,124 @@ mod tests {
             serde_json::json!("downloading")
         );
     }
+
+    #[tokio::test]
+    async fn test_check_available_updates_endpoint() {
+        use crate::api::handlers::ApiHandlers;
+        use crate::config::{init_handle, Config};
+        use crate::map_installer::{
+            AvailableMapUpdate, MapInstallationService, MapUpdatesStatus,
+        };
+        use crate::registry::SourceKind;
+        use crate::test_helpers;
+
+        let (registry, dirs) = test_helpers::setup_test_dirs().await.unwrap();
+        let paths = dirs.service_paths();
+        let installer = Arc::new(
+            MapInstallationService::new(
+                Arc::clone(&registry),
+                paths.addons_dir,
+                paths.download_dir,
+                100 * 1024 * 1024,
+                1024 * 1024 * 1024,
+                10000,
+            )
+            .await
+            .unwrap(),
+        );
+
+        // Stale pending from a previous run should be cleared when sources are disabled.
+        installer.pending_updates().replace_for_source(
+            SourceKind::Workshop,
+            vec![AvailableMapUpdate {
+                name: "Stale".to_string(),
+                map_id: 1,
+                source_kind: SourceKind::Workshop,
+                workshop_id: Some(99),
+            }],
+        );
+        installer.pending_updates().replace_for_source(
+            SourceKind::L4d2Center,
+            vec![AvailableMapUpdate {
+                name: "StaleL4d".to_string(),
+                map_id: 2,
+                source_kind: SourceKind::L4d2Center,
+                workshop_id: None,
+            }],
+        );
+
+        let mut config = Config::default();
+        config.workshop_update_check_enabled = false;
+        config.l4d2center_update_check_enabled = false;
+
+        let handlers = Arc::new(ApiHandlers::new(
+            registry,
+            Arc::clone(&installer),
+            init_handle(config),
+        ));
+        let app = HttpServer::router(handlers);
+        let response = app
+            .oneshot(
+                Request::post("/api/maps/updates/check")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: ApiResponse<MapUpdatesStatus> = serde_json::from_slice(&body).unwrap();
+        assert!(parsed.success);
+        let data = parsed.data.unwrap();
+        assert!(data.available.is_empty());
+        assert!(data.in_progress.is_empty());
+        assert!(installer.pending_updates().list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_check_available_updates_conflict_when_busy() {
+        use crate::api::handlers::ApiHandlers;
+        use crate::config::{init_handle, Config};
+        use crate::map_installer::MapInstallationService;
+        use crate::test_helpers;
+
+        let (registry, dirs) = test_helpers::setup_test_dirs().await.unwrap();
+        let paths = dirs.service_paths();
+        let installer = Arc::new(
+            MapInstallationService::new(
+                Arc::clone(&registry),
+                paths.addons_dir,
+                paths.download_dir,
+                100 * 1024 * 1024,
+                1024 * 1024 * 1024,
+                10000,
+            )
+            .await
+            .unwrap(),
+        );
+
+        let mut config = Config::default();
+        config.workshop_update_check_enabled = false;
+        config.l4d2center_update_check_enabled = false;
+
+        let handlers = Arc::new(ApiHandlers::new(
+            registry,
+            Arc::clone(&installer),
+            init_handle(config),
+        ));
+        let app = HttpServer::router(handlers);
+
+        let _held = installer.try_lock_updates_check().expect("acquire check lock");
+        let response = app
+            .oneshot(
+                Request::post("/api/maps/updates/check")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
 }

@@ -34,6 +34,123 @@ impl ApiHandlers {
         }))
     }
 
+    pub async fn check_available_updates(
+        &self,
+    ) -> Result<Json<ApiResponse<MapUpdatesStatus>>, ApiError> {
+        info!("Manual bulk update check request received");
+        let _check_guard = self.installer.try_lock_updates_check().ok_or_else(|| {
+            ApiError::conflict("A map update check is already in progress")
+        })?;
+
+        let current_config = crate::config::read_config(&self.config);
+        let pending = self.installer.pending_updates();
+
+        let workshop_enabled = current_config.workshop_update_check_enabled;
+        let l4d2_enabled = current_config.l4d2center_update_check_enabled;
+        let mut enabled_attempts = 0usize;
+        let mut enabled_successes = 0usize;
+
+        // 1. Check Workshop
+        if workshop_enabled {
+            enabled_attempts += 1;
+            match self
+                .installer
+                .update_workshop_maps(None, false, true)
+                .await
+            {
+                Ok(report) => {
+                    if !report.failed.is_empty() {
+                        tracing::warn!(
+                            failed = report.failed.len(),
+                            "Workshop check reported per-map failures"
+                        );
+                    }
+                    let available: Vec<_> = report
+                        .available
+                        .iter()
+                        .map(|item| crate::map_installer::AvailableMapUpdate {
+                            name: item.map.name.clone(),
+                            map_id: item.map.id,
+                            source_kind: crate::registry::SourceKind::Workshop,
+                            workshop_id: Some(item.workshop_id),
+                        })
+                        .collect();
+                    let exclude = self.installer.active_updates().active_ids();
+                    pending.replace_for_source_excluding(
+                        crate::registry::SourceKind::Workshop,
+                        available,
+                        &exclude,
+                    );
+                    enabled_successes += 1;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Manual workshop update check failed");
+                    pending.replace_for_source(crate::registry::SourceKind::Workshop, vec![]);
+                }
+            }
+        } else {
+            pending.replace_for_source(crate::registry::SourceKind::Workshop, vec![]);
+        }
+
+        // 2. Check L4D2Center
+        if l4d2_enabled {
+            enabled_attempts += 1;
+            match self
+                .installer
+                .update_l4d2center_maps(
+                    &current_config.l4d2center_index_url,
+                    None,
+                    None,
+                    false,
+                    true,
+                )
+                .await
+            {
+                Ok(report) => {
+                    if !report.failed.is_empty() {
+                        tracing::warn!(
+                            failed = report.failed.len(),
+                            "L4D2Center check reported per-map failures"
+                        );
+                    }
+                    let available: Vec<_> = report
+                        .available
+                        .iter()
+                        .map(|item| crate::map_installer::AvailableMapUpdate {
+                            name: item.name.clone(),
+                            map_id: item.map_id,
+                            source_kind: crate::registry::SourceKind::L4d2Center,
+                            workshop_id: None,
+                        })
+                        .collect();
+                    let exclude = self.installer.active_updates().active_ids();
+                    pending.replace_for_source_excluding(
+                        crate::registry::SourceKind::L4d2Center,
+                        available,
+                        &exclude,
+                    );
+                    enabled_successes += 1;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Manual L4D2Center update check failed");
+                    pending.replace_for_source(crate::registry::SourceKind::L4d2Center, vec![]);
+                }
+            }
+        } else {
+            pending.replace_for_source(crate::registry::SourceKind::L4d2Center, vec![]);
+        }
+
+        // If every enabled source failed, surface an error instead of "no updates".
+        if enabled_attempts > 0 && enabled_successes == 0 {
+            return Err(ApiError::internal(
+                "Map update check failed for all enabled sources",
+            ));
+        }
+
+        // Return updated status
+        self.list_available_updates().await
+    }
+
     pub async fn list_maps(
         &self,
     ) -> Result<Json<ApiResponse<Vec<MapEntry>>>, ApiError> {

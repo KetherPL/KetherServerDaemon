@@ -207,7 +207,6 @@ impl MapInstallationService {
                 report.skipped += 1;
                 continue;
             };
-            self.pending_updates.remove_map_ids(&[map_id]);
 
             let download_url = encode_download_url(&index_entry.download_link);
             let progress_state = self.active_updates.clone();

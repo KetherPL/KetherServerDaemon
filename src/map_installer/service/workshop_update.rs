@@ -48,6 +48,20 @@ impl MapInstallationService {
 
         let mut candidates = Vec::new();
         for entry in entries {
+            if let Some(workshop_id) = entry.workshop_id {
+                candidates.push(Candidate { entry, workshop_id });
+                continue;
+            }
+            // Never MD5/parse non-workshop maps when looking for workshop IDs.
+            if entry.source_kind != SourceKind::Workshop {
+                report.not_workshop += 1;
+                continue;
+            }
+            // check_only: skip expensive file resolve for workshop maps missing workshop_id.
+            if check_only {
+                report.not_workshop += 1;
+                continue;
+            }
             match self.resolve_workshop_id_for_entry(&entry).await? {
                 Some(workshop_id) => candidates.push(Candidate { entry, workshop_id }),
                 None => report.not_workshop += 1,
@@ -123,7 +137,6 @@ impl MapInstallationService {
                 report.skipped += 1;
                 continue;
             };
-            self.pending_updates.remove_map_ids(&[map_id]);
 
             let progress_state = self.active_updates.clone();
             let on_progress: crate::downloader::client::DownloadProgressCallback =

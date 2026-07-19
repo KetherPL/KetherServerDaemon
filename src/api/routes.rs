@@ -35,6 +35,12 @@ pub async fn list_available_updates_handler(
     handlers.list_available_updates().await
 }
 
+pub async fn check_available_updates_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+) -> Result<Json<ApiResponse<MapUpdatesStatus>>, ApiError> {
+    handlers.check_available_updates().await
+}
+
 pub async fn get_map_handler(
     axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
     Path(id): Path<String>,
@@ -118,6 +124,7 @@ pub fn routes(handlers: Arc<ApiHandlers>) -> Router {
         .route("/api/maps/discover", post(discover_handler))
         .route("/api/maps/compact", post(compact_handler))
         .route("/api/maps/updates/available", get(list_available_updates_handler))
+        .route("/api/maps/updates/check", post(check_available_updates_handler))
         .route("/api/maps", get(list_maps_handler))
         .route(
             "/api/maps/{id}",

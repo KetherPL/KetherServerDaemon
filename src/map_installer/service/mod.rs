@@ -31,6 +31,8 @@ pub struct MapInstallationService {
     pub(super) download_semaphore: Semaphore,
     pub(super) pending_updates: PendingUpdatesState,
     pub(super) active_updates: ActiveUpdatesState,
+    /// Single-flight for bulk workshop+l4d2center update checks (manual + periodic).
+    pub(super) updates_check_lock: Mutex<()>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +138,7 @@ impl MapInstallationService {
             download_semaphore: Semaphore::new(2),
             pending_updates: PendingUpdatesState::new(),
             active_updates: ActiveUpdatesState::new(),
+            updates_check_lock: Mutex::new(()),
         })
     }
 
@@ -145,6 +148,18 @@ impl MapInstallationService {
 
     pub fn active_updates(&self) -> ActiveUpdatesState {
         self.active_updates.clone()
+    }
+
+    /// Try to acquire the bulk update-check lock. Returns `None` if another check is running.
+    pub fn try_lock_updates_check(
+        &self,
+    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.updates_check_lock.try_lock().ok()
+    }
+
+    /// Acquire the bulk update-check lock (used by the periodic task).
+    pub async fn lock_updates_check(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.updates_check_lock.lock().await
     }
     
     /// Install a map from a URL or workshop ID
@@ -209,6 +224,13 @@ impl MapInstallationService {
             .find(|d| d.workshop_id == workshop_id)
             .ok_or_else(|| anyhow::anyhow!("Workshop item {workshop_id} not found on Steam"))?;
 
+        // Guard: check we have enough disk space before initiating the download.
+        // file_size == 0 means Steam didn't report it — we skip the guard in that case.
+        if detail.file_size > 0 {
+            crate::utils::check_sufficient_space(&self.temp_dir, detail.file_size)
+                .with_context(|| format!("Disk space check failed before downloading workshop map {workshop_id}"))?;
+        }
+
         let downloaded_path = self
             .workshop_downloader
             .download_from_details(detail)
@@ -241,6 +263,11 @@ impl MapInstallationService {
         info!(url = %url, "Installing map from URL");
 
         let source_kind = source_kind_from_url(url);
+
+        // Guard: check for a reasonable minimum of free disk space (512 MiB) before
+        // downloading from an external URL where the final size is not yet known.
+        crate::utils::check_sufficient_space(&self.temp_dir, 512 * 1024 * 1024)
+            .with_context(|| format!("Disk space check failed before downloading from {url}"))?;
 
         let downloaded_path = self.zip_downloader.download_zip(url).await?;
 
@@ -345,6 +372,11 @@ impl MapInstallationService {
         expected_installed_filename: Option<String>,
     ) -> anyhow::Result<MapEntry> {
         info!(path = %vpk_path.display(), "Installing VPK file");
+        
+        // Integrity check: verify VPK magic bytes (0x55AA1234 / 0x34 0x12 0xAA 0x55)
+        // before doing anything else with the file.
+        crate::utils::disk_space::validate_vpk_magic(&vpk_path).await
+            .with_context(|| format!("VPK integrity check failed for {}", vpk_path.display()))?;
         
         // Extract metadata to get name and version
         let metadata = self.vpk_extractor.extract_vpk_metadata(vpk_path.clone()).await?;

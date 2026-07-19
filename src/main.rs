@@ -502,139 +502,160 @@ async fn main() -> anyhow::Result<()> {
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             }
 
-            if !current.workshop_update_check_enabled && !current.l4d2center_update_check_enabled {
-                pending_updates_task.replace_for_source(SourceKind::Workshop, vec![]);
-                pending_updates_task.replace_for_source(SourceKind::L4d2Center, vec![]);
-                continue;
-            }
+            let workshop_enabled = current.workshop_update_check_enabled;
+            let l4d2_enabled = current.l4d2center_update_check_enabled;
+            let workshop_auto_apply = current.workshop_update_auto_apply;
+            let l4d2_auto_apply = current.l4d2center_update_auto_apply;
+            let index_url = current.l4d2center_index_url.clone();
 
-            if current.workshop_update_check_enabled {
-                match installer_map_update
-                    .update_workshop_maps(None, false, true)
-                    .await
-                {
-                    Ok(report) => {
-                        let available: Vec<_> = report
-                            .available
-                            .iter()
-                            .map(|item| map_installer::AvailableMapUpdate {
-                                name: item.map.name.clone(),
-                                map_id: item.map.id,
-                                source_kind: SourceKind::Workshop,
-                                workshop_id: Some(item.workshop_id),
-                            })
-                            .collect();
-                        let exclude = installer_map_update.active_updates().active_ids();
-                        pending_updates_task.replace_for_source_excluding(
-                            SourceKind::Workshop,
-                            available.clone(),
-                            &exclude,
-                        );
+            // Check + pending refresh under the lock; auto-apply runs after drop.
+            let mut workshop_to_apply: Option<Vec<map_installer::AvailableMapUpdate>> = None;
+            let mut l4d2_to_apply: Option<Vec<map_installer::AvailableMapUpdate>> = None;
 
-                        if !available.is_empty() {
-                            if current.workshop_update_auto_apply {
-                                info!(
-                                    count = available.len(),
-                                    "Applying available workshop map updates"
-                                );
-                                match installer_map_update
-                                    .update_workshop_maps(None, false, false)
-                                    .await
-                                {
-                                    Ok(apply_report) => {
-                                        for failure in &apply_report.failed {
-                                            error!(
-                                                map_id = failure.map_id,
-                                                error = %failure.error,
-                                                "Failed to auto-apply workshop update"
-                                            );
-                                        }
-                                        info!(
-                                            updated = apply_report.updated.len(),
-                                            failed = apply_report.failed.len(),
-                                            "Workshop auto-apply finished"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!(error = %e, "Workshop auto-apply failed");
-                                    }
+            {
+                let _check_guard = installer_map_update.lock_updates_check().await;
+
+                if !workshop_enabled && !l4d2_enabled {
+                    pending_updates_task.replace_for_source(SourceKind::Workshop, vec![]);
+                    pending_updates_task.replace_for_source(SourceKind::L4d2Center, vec![]);
+                    continue;
+                }
+
+                if workshop_enabled {
+                    match installer_map_update
+                        .update_workshop_maps(None, false, true)
+                        .await
+                    {
+                        Ok(report) => {
+                            let available: Vec<_> = report
+                                .available
+                                .iter()
+                                .map(|item| map_installer::AvailableMapUpdate {
+                                    name: item.map.name.clone(),
+                                    map_id: item.map.id,
+                                    source_kind: SourceKind::Workshop,
+                                    workshop_id: Some(item.workshop_id),
+                                })
+                                .collect();
+                            let exclude = installer_map_update.active_updates().active_ids();
+                            pending_updates_task.replace_for_source_excluding(
+                                SourceKind::Workshop,
+                                available.clone(),
+                                &exclude,
+                            );
+
+                            if !available.is_empty() {
+                                if workshop_auto_apply {
+                                    workshop_to_apply = Some(available);
+                                } else {
+                                    notify_console_updates("workshop", &available);
                                 }
-                            } else {
-                                notify_console_updates("workshop", &available);
                             }
                         }
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Periodic workshop update check failed");
-                    }
-                }
-            } else {
-                pending_updates_task.replace_for_source(SourceKind::Workshop, vec![]);
-            }
-
-            if current.l4d2center_update_check_enabled {
-                let index_url = current.l4d2center_index_url.clone();
-                match installer_map_update
-                    .update_l4d2center_maps(&index_url, None, None, false, true)
-                    .await
-                {
-                    Ok(report) => {
-                        let available: Vec<_> = report
-                            .available
-                            .iter()
-                            .map(|item| map_installer::AvailableMapUpdate {
-                                name: item.name.clone(),
-                                map_id: item.map_id,
-                                source_kind: SourceKind::L4d2Center,
-                                workshop_id: None,
-                            })
-                            .collect();
-                        let exclude = installer_map_update.active_updates().active_ids();
-                        pending_updates_task.replace_for_source_excluding(
-                            SourceKind::L4d2Center,
-                            available.clone(),
-                            &exclude,
-                        );
-
-                        if !available.is_empty() {
-                            if current.l4d2center_update_auto_apply {
-                                info!(
-                                    count = available.len(),
-                                    "Applying available L4D2Center map updates"
-                                );
-                                match installer_map_update
-                                    .update_l4d2center_maps(&index_url, None, None, false, false)
-                                    .await
-                                {
-                                    Ok(apply_report) => {
-                                        for failure in &apply_report.failed {
-                                            error!(
-                                                map_id = failure.map_id,
-                                                error = %failure.error,
-                                                "Failed to auto-apply L4D2Center update"
-                                            );
-                                        }
-                                        info!(
-                                            updated = apply_report.updated.len(),
-                                            failed = apply_report.failed.len(),
-                                            "L4D2Center auto-apply finished"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!(error = %e, "L4D2Center auto-apply failed");
-                                    }
-                                }
-                            } else {
-                                notify_console_updates("l4d2center", &available);
-                            }
+                        Err(e) => {
+                            error!(error = %e, "Periodic workshop update check failed");
                         }
                     }
+                } else {
+                    pending_updates_task.replace_for_source(SourceKind::Workshop, vec![]);
+                }
+
+                if l4d2_enabled {
+                    match installer_map_update
+                        .update_l4d2center_maps(&index_url, None, None, false, true)
+                        .await
+                    {
+                        Ok(report) => {
+                            let available: Vec<_> = report
+                                .available
+                                .iter()
+                                .map(|item| map_installer::AvailableMapUpdate {
+                                    name: item.name.clone(),
+                                    map_id: item.map_id,
+                                    source_kind: SourceKind::L4d2Center,
+                                    workshop_id: None,
+                                })
+                                .collect();
+                            let exclude = installer_map_update.active_updates().active_ids();
+                            pending_updates_task.replace_for_source_excluding(
+                                SourceKind::L4d2Center,
+                                available.clone(),
+                                &exclude,
+                            );
+
+                            if !available.is_empty() {
+                                if l4d2_auto_apply {
+                                    l4d2_to_apply = Some(available);
+                                } else {
+                                    notify_console_updates("l4d2center", &available);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Periodic L4D2Center update check failed");
+                        }
+                    }
+                } else {
+                    pending_updates_task.replace_for_source(SourceKind::L4d2Center, vec![]);
+                }
+            } // drop updates_check_lock before auto-apply downloads
+
+            if let Some(available) = workshop_to_apply {
+                info!(
+                    count = available.len(),
+                    "Applying available workshop map updates"
+                );
+                match installer_map_update
+                    .update_workshop_maps(None, false, false)
+                    .await
+                {
+                    Ok(apply_report) => {
+                        for failure in &apply_report.failed {
+                            error!(
+                                map_id = failure.map_id,
+                                error = %failure.error,
+                                "Failed to auto-apply workshop update"
+                            );
+                        }
+                        info!(
+                            updated = apply_report.updated.len(),
+                            failed = apply_report.failed.len(),
+                            "Workshop auto-apply finished"
+                        );
+                    }
                     Err(e) => {
-                        error!(error = %e, "Periodic L4D2Center update check failed");
+                        error!(error = %e, "Workshop auto-apply failed");
                     }
                 }
-            } else {
-                pending_updates_task.replace_for_source(SourceKind::L4d2Center, vec![]);
+            }
+
+            if let Some(available) = l4d2_to_apply {
+                info!(
+                    count = available.len(),
+                    "Applying available L4D2Center map updates"
+                );
+                match installer_map_update
+                    .update_l4d2center_maps(&index_url, None, None, false, false)
+                    .await
+                {
+                    Ok(apply_report) => {
+                        for failure in &apply_report.failed {
+                            error!(
+                                map_id = failure.map_id,
+                                error = %failure.error,
+                                "Failed to auto-apply L4D2Center update"
+                            );
+                        }
+                        info!(
+                            updated = apply_report.updated.len(),
+                            failed = apply_report.failed.len(),
+                            "L4D2Center auto-apply finished"
+                        );
+                    }
+                    Err(e) => {
+                        error!(error = %e, "L4D2Center auto-apply failed");
+                    }
+                }
             }
         }
     });

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use std::sync::Arc;
 
-use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
+use reedline::
+    {DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, ReedlineEvent, Signal,
+     KeyCode, KeyModifiers, EditCommand, Completer, Span, Suggestion};
 use tokio::sync::mpsc;
 
 use crate::config::ConfigHandle;
@@ -22,10 +24,25 @@ pub struct Repl {
 
 impl Repl {
     fn create_editor() -> (Reedline, DefaultPrompt) {
-        (
-            Reedline::create(),
-            DefaultPrompt::new(DefaultPromptSegment::Empty, DefaultPromptSegment::Empty),
-        )
+        // Persistent history stored next to the binary.
+        let history_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join(".kether_repl_history")));
+
+        let editor = if let Some(path) = history_path {
+            let history = FileBackedHistory::with_file(500, path)
+                .unwrap_or_else(|_| FileBackedHistory::with_file(500, "".into()).unwrap());
+            Reedline::create().with_history(Box::new(history))
+        } else {
+            Reedline::create()
+        };
+
+        let prompt = DefaultPrompt::new(
+            DefaultPromptSegment::Basic("\x1b[1;36mkether\x1b[0m\x1b[0;35m »\x1b[0m ".to_string()),
+            DefaultPromptSegment::Empty,
+        );
+
+        (editor, prompt)
     }
 
     pub fn new() -> Self {
