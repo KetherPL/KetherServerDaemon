@@ -2,6 +2,7 @@
 mod api;
 mod catalog;
 mod config;
+mod control;
 mod config_watch;
 mod downloader;
 mod extractor;
@@ -116,6 +117,8 @@ fn registry_sync_fingerprint(maps: &[registry::MapEntry]) -> u64 {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    control::mark_started();
+
     // Load configuration
     let (config, config_path) = Config::load_with_path()?;
     config.validate()?;
@@ -670,7 +673,8 @@ async fn main() -> anyhow::Result<()> {
         installer_http,
         http_addr,
         http_config_handle,
-    );
+    )
+    .with_command_sender(daemon_tx.clone());
     let http_task = tokio::spawn(async move {
         if let Err(e) = http_server.serve().await {
             error!(error = %e, "HTTP server error");
@@ -689,6 +693,7 @@ async fn main() -> anyhow::Result<()> {
     info!("All services started. Waiting for shutdown signal...");
     
     // Wait for shutdown signal
+    let mut restart_requested = false;
     tokio::select! {
         res = signal::ctrl_c() => match res {
             Ok(()) => {
@@ -702,6 +707,10 @@ async fn main() -> anyhow::Result<()> {
             Some(DaemonCommand::Stop) => {
                 info!("Received stop command from REPL");
             }
+            Some(DaemonCommand::Restart) => {
+                info!("Received restart command");
+                restart_requested = true;
+            }
             None => {
                 warn!("REPL command channel closed");
             }
@@ -710,6 +719,16 @@ async fn main() -> anyhow::Result<()> {
     
     // Graceful shutdown
     info!("Initiating graceful shutdown...");
+    if restart_requested {
+        // Don't cut a running download/install/update short. The HTTP restart endpoint
+        // already refuses while busy (unless forced), so this mainly covers the REPL.
+        if !installer
+            .wait_until_idle(tokio::time::Duration::from_secs(120))
+            .await
+        {
+            warn!("Map operations still running after 120 s; restarting anyway");
+        }
+    }
     
     watcher_task.abort();
     watcher_worker.abort();
@@ -723,6 +742,13 @@ async fn main() -> anyhow::Result<()> {
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     
     info!("Shutdown complete");
+
+    if restart_requested {
+        info!("Restarting daemon...");
+        let err = control::restart_process();
+        error!(error = %err, "Failed to restart the daemon; exiting instead");
+        std::process::exit(1);
+    }
     
     // The REPL key listener runs an infinite keyboard-polling loop inside
     // `spawn_blocking`, which cannot be aborted. Dropping the runtime would block

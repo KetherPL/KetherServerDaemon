@@ -12,6 +12,8 @@ use crate::map_installer::MapInstallationService;
 #[derive(Debug, Clone, Copy)]
 pub enum DaemonCommand {
     Stop,
+    /// Gracefully stop and re-execute the daemon in place (same PID and terminal).
+    Restart,
 }
 
 pub struct Repl {
@@ -137,6 +139,19 @@ impl Repl {
                                 }
                                 break;
                             }
+                            "R" | "restart" => {
+                                match &self.daemon_command_tx {
+                                    Some(tx) => {
+                                        if let Err(err) = tx.send(DaemonCommand::Restart) {
+                                            eprintln!("Failed to request daemon restart: {err}");
+                                        } else {
+                                            println!("Restart requested. Closing REPL...");
+                                        }
+                                    }
+                                    None => eprintln!("Daemon command channel unavailable."),
+                                }
+                                break;
+                            }
                             "" => {}
                             other => {
                                 println!(
@@ -180,6 +195,7 @@ impl Repl {
         println!("  l4d2center install|i <name> - Install a map from the L4D2Center catalog");
         println!("  l4d2center update|u [id|name] [--check|-c] [--force|-f] - Check or update L4D2Center maps");
         println!("  q, quit, exit - Exit the REPL");
+        println!("  R, restart - Restart the daemon (waits for running map operations, re-runs the binary in place)");
         println!("  S, stop - Stop the daemon");
     }
 }

@@ -7,6 +7,7 @@ use tracing::info;
 use crate::api::handlers::ApiHandlers;
 use crate::api::routes;
 use crate::config::ConfigHandle;
+use crate::repl::DaemonCommand;
 use crate::map_installer::MapInstallationService;
 use crate::registry::Registry;
 
@@ -26,6 +27,15 @@ impl HttpServer {
             handlers: ApiHandlers::new(registry, installer, config),
             addr,
         }
+    }
+
+    /// Lets the HTTP API request daemon lifecycle actions (restart).
+    pub fn with_command_sender(
+        mut self,
+        command_tx: tokio::sync::mpsc::UnboundedSender<DaemonCommand>,
+    ) -> Self {
+        self.handlers = self.handlers.with_command_sender(command_tx);
+        self
     }
 
     pub fn router(handlers: Arc<ApiHandlers>) -> Router {
@@ -459,5 +469,132 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    async fn control_test_app(
+        busy: bool,
+        command_tx: Option<tokio::sync::mpsc::UnboundedSender<DaemonCommand>>,
+    ) -> (Router, crate::test_helpers::TestDirs) {
+        use crate::config::init_handle;
+        use crate::map_installer::{ActiveMapUpdate, MapInstallationService};
+        use crate::registry::SourceKind;
+        use crate::test_helpers;
+
+        let (registry, dirs) = test_helpers::setup_test_dirs().await.unwrap();
+        let paths = dirs.service_paths();
+        let installer = Arc::new(
+            MapInstallationService::new(
+                Arc::clone(&registry),
+                paths.addons_dir,
+                paths.download_dir,
+                100 * 1024 * 1024,
+                1024 * 1024 * 1024,
+                10000,
+            )
+            .await
+            .unwrap(),
+        );
+        if busy {
+            installer.active_updates().mark_started(ActiveMapUpdate::new(
+                "Updating Bar".to_string(),
+                99,
+                SourceKind::L4d2Center,
+            ));
+        }
+        let mut handlers = ApiHandlers::new(registry, installer, init_handle(Config::default()));
+        if let Some(tx) = command_tx {
+            handlers = handlers.with_command_sender(tx);
+        }
+        (HttpServer::router(Arc::new(handlers)), dirs)
+    }
+
+    async fn json_body<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn daemon_status_reports_busy_state_and_restart_support() {
+        use crate::api::handlers::DaemonStatus;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (app, _dirs) = control_test_app(true, Some(tx)).await;
+        let response = app
+            .oneshot(Request::get("/api/daemon/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: ApiResponse<DaemonStatus> = json_body(response).await;
+        let status = parsed.data.unwrap();
+        assert_eq!(status.pid, std::process::id());
+        assert!(status.restart_supported);
+        assert_eq!(status.busy.as_deref(), Some("map updates are in progress"));
+    }
+
+    #[tokio::test]
+    async fn daemon_restart_sends_restart_command_when_idle() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (app, _dirs) = control_test_app(false, Some(tx)).await;
+        let response = app
+            .oneshot(
+                Request::post("/api/daemon/restart")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let command = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("restart command should be sent");
+        assert!(matches!(command, Some(DaemonCommand::Restart)));
+    }
+
+    #[tokio::test]
+    async fn daemon_restart_refuses_while_busy_unless_forced() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (app, _dirs) = control_test_app(true, Some(tx)).await;
+
+        let refused = app
+            .clone()
+            .oneshot(
+                Request::post("/api/daemon/restart")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert!(rx.try_recv().is_err());
+
+        let forced = app
+            .oneshot(
+                Request::post("/api/daemon/restart?force=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forced.status(), StatusCode::OK);
+        let command = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("forced restart command should be sent");
+        assert!(matches!(command, Some(DaemonCommand::Restart)));
+    }
+
+    #[tokio::test]
+    async fn daemon_restart_unavailable_without_command_channel() {
+        let (app, _dirs) = control_test_app(false, None).await;
+        let response = app
+            .oneshot(
+                Request::post("/api/daemon/restart")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

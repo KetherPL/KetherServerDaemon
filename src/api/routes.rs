@@ -6,7 +6,7 @@ use axum::{
 use std::sync::Arc;
 
 use crate::api::error::ApiError;
-use crate::api::handlers::ApiHandlers;
+use crate::api::handlers::{ApiHandlers, DaemonStatus, RestartAccepted, RestartRequest};
 use crate::api::response::ApiResponse;
 use crate::api::auth::require_api_key;
 use crate::api::types::{
@@ -21,6 +21,19 @@ use crate::registry::MapEntry;
 
 pub async fn health_handler() -> Json<ApiResponse<&'static str>> {
     Json(ApiResponse::success("ok"))
+}
+
+pub async fn daemon_status_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+) -> Json<ApiResponse<DaemonStatus>> {
+    handlers.status()
+}
+
+pub async fn daemon_restart_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+    axum::extract::Query(request): axum::extract::Query<RestartRequest>,
+) -> Result<Json<ApiResponse<RestartAccepted>>, ApiError> {
+    handlers.restart(request)
 }
 
 pub async fn list_maps_handler(
@@ -126,6 +139,8 @@ pub fn routes(handlers: Arc<ApiHandlers>) -> Router {
         .route("/api/maps/updates/available", get(list_available_updates_handler))
         .route("/api/maps/updates/check", post(check_available_updates_handler))
         .route("/api/maps", get(list_maps_handler))
+        .route("/api/daemon/status", get(daemon_status_handler))
+        .route("/api/daemon/restart", post(daemon_restart_handler))
         .route(
             "/api/maps/{id}",
             get(get_map_handler).patch(modify_map_handler),

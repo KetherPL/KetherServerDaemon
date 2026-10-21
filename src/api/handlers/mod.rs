@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+mod control;
 mod l4d2center;
 mod maintenance;
 mod maps;
@@ -16,11 +17,15 @@ use crate::config::{read_config, ConfigHandle};
 use crate::map_installer::MapInstallationService;
 use crate::maps_denylist::Mapsdenylist;
 use crate::registry::Registry;
+use crate::repl::DaemonCommand;
+
+pub use control::{DaemonStatus, RestartAccepted, RestartRequest};
 
 pub struct ApiHandlers {
     pub(super) registry: Arc<dyn Registry>,
     pub(super) installer: Arc<MapInstallationService>,
     pub(super) config: ConfigHandle,
+    pub(super) command_tx: Option<tokio::sync::mpsc::UnboundedSender<DaemonCommand>>,
 }
 
 impl ApiHandlers {
@@ -33,7 +38,17 @@ impl ApiHandlers {
             registry,
             installer,
             config,
+            command_tx: None,
         }
+    }
+
+    /// Enables lifecycle endpoints (restart) by giving the handlers the daemon command channel.
+    pub fn with_command_sender(
+        mut self,
+        command_tx: tokio::sync::mpsc::UnboundedSender<DaemonCommand>,
+    ) -> Self {
+        self.command_tx = Some(command_tx);
+        self
     }
 
     pub(super) fn denylist(&self) -> Mapsdenylist {

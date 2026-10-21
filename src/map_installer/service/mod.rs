@@ -17,6 +17,9 @@ use crate::extractor::{sevenz::SevenZExtractor, zip::ZipExtractor, traits::Extra
 use crate::registry::{models::{MapEntry, SourceKind}, traits::Registry};
 use serde::{Deserialize, Serialize};
 
+/// Maximum number of concurrent heavy download/install operations.
+const MAX_CONCURRENT_DOWNLOADS: usize = 2;
+
 pub struct MapInstallationService {
     registry: Arc<dyn Registry>,
     workshop_downloader: WorkshopDownloader,
@@ -135,11 +138,42 @@ impl MapInstallationService {
             addons_dir,
             temp_dir,
             op_lock: Mutex::new(()),
-            download_semaphore: Semaphore::new(2),
+            download_semaphore: Semaphore::new(MAX_CONCURRENT_DOWNLOADS),
             pending_updates: PendingUpdatesState::new(),
             active_updates: ActiveUpdatesState::new(),
             updates_check_lock: Mutex::new(()),
         })
+    }
+
+    /// Describes map work currently running (downloads, installs, updates, disk/registry
+    /// operations), or `None` when the installer is idle. Used to avoid restarting the
+    /// daemon in the middle of an operation.
+    pub fn busy_reason(&self) -> Option<&'static str> {
+        if !self.active_updates.list().is_empty() {
+            return Some("map updates are in progress");
+        }
+        if self.download_semaphore.available_permits() < MAX_CONCURRENT_DOWNLOADS {
+            return Some("map downloads are in progress");
+        }
+        if self.op_lock.try_lock().is_err() {
+            return Some("a map operation is in progress");
+        }
+        None
+    }
+
+    /// Waits until [`Self::busy_reason`] reports idle, polling every 500 ms, for at most
+    /// `timeout`. Returns `true` if the installer became idle.
+    pub async fn wait_until_idle(&self, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.busy_reason().is_none() {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
     }
 
     pub fn pending_updates(&self) -> PendingUpdatesState {
