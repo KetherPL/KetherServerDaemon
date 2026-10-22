@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 use crate::config::{read_config, ConfigHandle};
-use crate::registry::models::MapEntry;
+use crate::registry::MapListing;
 use crate::sync::traits::{MapUpdate, SyncService};
 
 #[derive(Debug, Clone)]
@@ -49,7 +49,7 @@ impl BackendSyncService {
 
 #[derive(Serialize)]
 struct SyncRequest {
-    maps: Vec<MapEntry>,
+    maps: Vec<MapListing>,
 }
 
 #[derive(Deserialize)]
@@ -59,7 +59,7 @@ struct UpdatesResponse {
 
 #[async_trait]
 impl SyncService for BackendSyncService {
-    async fn sync_registry(&self, entries: Vec<MapEntry>) -> anyhow::Result<()> {
+    async fn sync_registry(&self, entries: Vec<MapListing>) -> anyhow::Result<()> {
         info!(count = entries.len(), "Syncing registry to backend");
         
         let request = SyncRequest { maps: entries };
@@ -110,7 +110,7 @@ impl SyncService for BackendSyncService {
 mod tests {
     use super::*;
     use crate::config::{init_handle, Config};
-    use crate::registry::models::SourceKind;
+    use crate::registry::models::{MapEntry, SourceKind};
     use crate::sync::traits::SyncService;
     use axum::{Json, Router, routing::{get, post}};
     use axum::http::StatusCode;
@@ -221,7 +221,7 @@ mod tests {
         .await;
 
         let service = service_with_url(base_url, Some("secret-token".to_string()));
-        service.sync_registry(vec![sample_map_entry()]).await.unwrap();
+        service.sync_registry(vec![sample_map_entry().into()]).await.unwrap();
 
         let stored = auth_header.lock().await.clone();
         assert_eq!(stored.as_deref(), Some("Bearer secret-token"));

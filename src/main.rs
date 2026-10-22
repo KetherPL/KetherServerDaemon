@@ -98,7 +98,7 @@ async fn cleanup_download_temp_dir(temp_dir: &std::path::Path) {
     }
 }
 
-fn registry_sync_fingerprint(maps: &[registry::MapEntry]) -> u64 {
+fn registry_sync_fingerprint(maps: &[registry::MapListing]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -111,6 +111,7 @@ fn registry_sync_fingerprint(maps: &[registry::MapEntry]) -> u64 {
         map.checksum.hash(&mut hasher);
         map.workshop_id.hash(&mut hasher);
         map.installed_at.timestamp().hash(&mut hasher);
+        map.size_bytes.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -455,7 +456,11 @@ async fn main() -> anyhow::Result<()> {
             // Push local state to backend when content changed.
             match installer_sync.registry().list_maps().await {
                 Ok(maps) => {
-                    let visible = read_denylist(&sync_config_handle).filter_visible(maps);
+                    let visible = registry::with_disk_sizes(
+                        read_denylist(&sync_config_handle).filter_visible(maps),
+                        installer_sync.addons_dir().to_path_buf(),
+                    )
+                    .await;
                     let fingerprint = registry_sync_fingerprint(&visible);
                     if last_push_fingerprint == Some(fingerprint) {
                         debug!("Skipping registry push; content unchanged");

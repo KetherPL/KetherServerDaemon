@@ -194,6 +194,26 @@ async fn test_list_maps_returns_entries() {
 }
 
 #[tokio::test]
+async fn test_list_and_get_map_report_disk_size() {
+    let (handlers, registry, dirs) = setup_api_fixture().await;
+    let addons = dirs.service_paths().addons_dir;
+    std::fs::write(addons.join("test_map.vpk"), vec![0u8; 4096]).unwrap();
+    let id = registry.add_map(sample_map()).await.unwrap();
+    let mut missing = sample_map();
+    missing.installed_path = "not_on_disk.vpk".to_string();
+    missing.source_url = "https://example.com/other.zip".to_string();
+    let missing_id = registry.add_map(missing).await.unwrap();
+
+    let maps = handlers.list_maps().await.unwrap().0.data.unwrap();
+    let size_of = |map_id| maps.iter().find(|m| m.id == map_id).unwrap().size_bytes;
+    assert_eq!(size_of(id), Some(4096));
+    assert_eq!(size_of(missing_id), None);
+
+    let single = handlers.get_map(Path(id.to_string())).await.unwrap().0.data.unwrap();
+    assert_eq!(single.size_bytes, Some(4096));
+}
+
+#[tokio::test]
 async fn test_list_maps_excludes_denylisted() {
     use std::sync::Arc;
 

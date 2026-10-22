@@ -9,7 +9,7 @@ use crate::api::service_error::{classify_modify_error, classify_uninstall_error}
 use crate::api::types::{InstallMapRequest, ModifyMapRequest};
 use crate::api::validation::{parse_map_id, validate_install_request, validate_modify_request, InstallSource};
 use crate::map_installer::MapUpdatesStatus;
-use crate::registry::MapEntry;
+use crate::registry::{with_disk_sizes, MapEntry, MapListing};
 
 use super::helpers::{installer_internal_err, ok_json, registry_internal_err};
 use super::ApiHandlers;
@@ -153,9 +153,15 @@ impl ApiHandlers {
 
     pub async fn list_maps(
         &self,
-    ) -> Result<Json<ApiResponse<Vec<MapEntry>>>, ApiError> {
+    ) -> Result<Json<ApiResponse<Vec<MapListing>>>, ApiError> {
         match self.registry.list_maps().await {
-            Ok(maps) => Ok(ok_json(self.denylist().filter_visible(maps))),
+            Ok(maps) => Ok(ok_json(
+                with_disk_sizes(
+                    self.denylist().filter_visible(maps),
+                    self.installer.addons_dir().to_path_buf(),
+                )
+                .await,
+            )),
             Err(e) => Err(registry_internal_err(e, "Failed to list maps")),
         }
     }
@@ -163,7 +169,7 @@ impl ApiHandlers {
     pub async fn get_map(
         &self,
         Path(id): Path<String>,
-    ) -> Result<Json<ApiResponse<MapEntry>>, ApiError> {
+    ) -> Result<Json<ApiResponse<MapListing>>, ApiError> {
         let map_id = parse_map_id(&id)?;
 
         match self.registry.get_map(map_id).await {
@@ -171,7 +177,11 @@ impl ApiHandlers {
                 if self.denylist().is_hidden(&map) {
                     return Err(ApiError::not_found(format!("Map #{map_id} not found")));
                 }
-                Ok(ok_json(map))
+                let listing = with_disk_sizes(vec![map], self.installer.addons_dir().to_path_buf())
+                    .await
+                    .pop()
+                    .expect("one entry in, one listing out");
+                Ok(ok_json(listing))
             }
             Ok(None) => Err(ApiError::not_found(format!("Map #{map_id} not found"))),
             Err(e) => Err(registry_internal_err(e, "Failed to get map")),

@@ -176,6 +176,11 @@ impl MapInstallationService {
         }
     }
 
+    /// The `left4dead2/addons` directory maps are installed into.
+    pub fn addons_dir(&self) -> &Path {
+        &self.addons_dir
+    }
+
     pub fn pending_updates(&self) -> PendingUpdatesState {
         self.pending_updates.clone()
     }

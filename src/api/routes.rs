@@ -17,7 +17,7 @@ use crate::catalog::L4d2CenterCatalogEntry;
 use crate::map_installer::{
     CompactReport, DiscoveryReport, L4d2CenterUpdateReport, MapUpdatesStatus, WorkshopUpdateReport,
 };
-use crate::registry::MapEntry;
+use crate::registry::{MapEntry, MapListing};
 
 pub async fn health_handler() -> Json<ApiResponse<&'static str>> {
     Json(ApiResponse::success("ok"))
@@ -38,7 +38,7 @@ pub async fn daemon_restart_handler(
 
 pub async fn list_maps_handler(
     axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
-) -> Result<Json<ApiResponse<Vec<MapEntry>>>, ApiError> {
+) -> Result<Json<ApiResponse<Vec<MapListing>>>, ApiError> {
     handlers.list_maps().await
 }
 
@@ -57,7 +57,7 @@ pub async fn check_available_updates_handler(
 pub async fn get_map_handler(
     axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<MapEntry>>, ApiError> {
+) -> Result<Json<ApiResponse<MapListing>>, ApiError> {
     handlers.get_map(Path(id)).await
 }
 
