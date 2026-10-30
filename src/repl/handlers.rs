@@ -319,4 +319,54 @@ impl Repl {
             }
         }
     }
+
+    pub(super) fn handle_server(&self, args: &[&str]) {
+        use crate::game_server::{game_server_action, game_server_status, ServiceAction, DEFAULT_L4D2_SERVICE};
+        let uid = unsafe { libc::getuid() };
+        let service = DEFAULT_L4D2_SERVICE;
+
+        let subcommand = args.first().copied().unwrap_or("");
+        match subcommand {
+            "status" | "s" | "" => {
+                let st = game_server_status(uid, service);
+                println!("Game server: {} | {} | {} | PID {}", st.service, st.active_state, st.sub_state, st.main_pid);
+                if !st.description.is_empty() {
+                    println!("  Description: {}", st.description);
+                }
+            }
+            "start" => {
+                print!("Starting game server ({service})... ");
+                match game_server_action(uid, service, ServiceAction::Start) {
+                    Ok(()) => {
+                        let st = game_server_status(uid, service);
+                        println!("done ({})", st.active_state);
+                    }
+                    Err(e) => eprintln!("failed: {e}"),
+                }
+            }
+            "stop" => {
+                print!("Stopping game server ({service})... ");
+                match game_server_action(uid, service, ServiceAction::Stop) {
+                    Ok(()) => {
+                        let st = game_server_status(uid, service);
+                        println!("done ({})", st.active_state);
+                    }
+                    Err(e) => eprintln!("failed: {e}"),
+                }
+            }
+            "restart" => {
+                print!("Restarting game server ({service})... ");
+                match game_server_action(uid, service, ServiceAction::Restart) {
+                    Ok(()) => {
+                        let st = game_server_status(uid, service);
+                        println!("done ({})", st.active_state);
+                    }
+                    Err(e) => eprintln!("failed: {e}"),
+                }
+            }
+            other => {
+                eprintln!("Unknown server subcommand '{other}'. Usage: server [status|start|stop|restart]");
+            }
+        }
+    }
 }

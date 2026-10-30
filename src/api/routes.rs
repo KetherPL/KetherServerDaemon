@@ -6,7 +6,7 @@ use axum::{
 use std::sync::Arc;
 
 use crate::api::error::ApiError;
-use crate::api::handlers::{ApiHandlers, DaemonStatus, RestartAccepted, RestartRequest};
+use crate::api::handlers::{ApiHandlers, DaemonStatus, GameServerActionResult, RestartAccepted, RestartRequest};
 use crate::api::response::ApiResponse;
 use crate::api::auth::require_api_key;
 use crate::api::types::{
@@ -14,6 +14,7 @@ use crate::api::types::{
     UpdateL4d2CenterRequest, UpdateWorkshopRequest,
 };
 use crate::catalog::L4d2CenterCatalogEntry;
+use crate::game_server::{GameServerStatus, ServiceAction};
 use crate::map_installer::{
     CompactReport, DiscoveryReport, L4d2CenterUpdateReport, MapUpdatesStatus, WorkshopUpdateReport,
 };
@@ -123,6 +124,32 @@ pub async fn modify_map_handler(
     handlers.modify_map(Path(id), Json(request)).await
 }
 
+// ── Game server control ──────────────────────────────────────────────────────
+
+pub async fn game_server_status_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+) -> Json<ApiResponse<GameServerStatus>> {
+    handlers.game_server_status_handler()
+}
+
+pub async fn game_server_start_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+) -> Result<Json<ApiResponse<GameServerActionResult>>, ApiError> {
+    handlers.game_server_action_handler(ServiceAction::Start)
+}
+
+pub async fn game_server_stop_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+) -> Result<Json<ApiResponse<GameServerActionResult>>, ApiError> {
+    handlers.game_server_action_handler(ServiceAction::Stop)
+}
+
+pub async fn game_server_restart_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+) -> Result<Json<ApiResponse<GameServerActionResult>>, ApiError> {
+    handlers.game_server_action_handler(ServiceAction::Restart)
+}
+
 pub fn routes(handlers: Arc<ApiHandlers>) -> Router {
     use axum::middleware;
     use axum::routing::{get, post};
@@ -141,6 +168,10 @@ pub fn routes(handlers: Arc<ApiHandlers>) -> Router {
         .route("/api/maps", get(list_maps_handler))
         .route("/api/daemon/status", get(daemon_status_handler))
         .route("/api/daemon/restart", post(daemon_restart_handler))
+        .route("/api/game-server/status", get(game_server_status_handler))
+        .route("/api/game-server/start", post(game_server_start_handler))
+        .route("/api/game-server/stop", post(game_server_stop_handler))
+        .route("/api/game-server/restart", post(game_server_restart_handler))
         .route(
             "/api/maps/{id}",
             get(get_map_handler).patch(modify_map_handler),

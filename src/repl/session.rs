@@ -122,6 +122,9 @@ impl Repl {
                             "l4d2center" | "l4c" => {
                                 self.handle_l4d2center(&runtime_handle, &args);
                             }
+                            "server" | "sv" => {
+                                self.handle_server(&args);
+                            }
                             "q" | "quit" | "exit" => {
                                 println!("Exiting REPL...");
                                 break;
@@ -194,6 +197,7 @@ impl Repl {
         println!("  l4d2center, l4c list|l|ls - List L4D2Center catalog maps and install status");
         println!("  l4d2center install|i <name> - Install a map from the L4D2Center catalog");
         println!("  l4d2center update|u [id|name] [--check|-c] [--force|-f] - Check or update L4D2Center maps");
+        println!("  server, sv [status|start|stop|restart] - Control the L4D2 game server service");
         println!("  q, quit, exit - Exit the REPL");
         println!("  R, restart - Restart the daemon (waits for running map operations, re-runs the binary in place)");
         println!("  S, stop - Stop the daemon");

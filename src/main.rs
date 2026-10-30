@@ -6,6 +6,7 @@ mod control;
 mod config_watch;
 mod downloader;
 mod extractor;
+mod game_server;
 mod logging;
 mod map_installer;
 mod maps_denylist;

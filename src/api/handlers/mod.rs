@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 mod control;
+mod game_server;
 mod l4d2center;
 mod maintenance;
 mod maps;
@@ -20,12 +21,17 @@ use crate::registry::Registry;
 use crate::repl::DaemonCommand;
 
 pub use control::{DaemonStatus, RestartAccepted, RestartRequest};
+pub use game_server::GameServerActionResult;
 
 pub struct ApiHandlers {
     pub(super) registry: Arc<dyn Registry>,
     pub(super) installer: Arc<MapInstallationService>,
     pub(super) config: ConfigHandle,
     pub(super) command_tx: Option<tokio::sync::mpsc::UnboundedSender<DaemonCommand>>,
+    /// UID used for `systemctl --user` game server control (0 = current user).
+    pub(super) game_server_uid: u32,
+    /// Systemd user service name (empty = default `l4d2-srcds1.service`).
+    pub(super) game_server_service: String,
 }
 
 impl ApiHandlers {
@@ -39,6 +45,8 @@ impl ApiHandlers {
             installer,
             config,
             command_tx: None,
+            game_server_uid: unsafe { libc::getuid() },
+            game_server_service: String::new(),
         }
     }
 
@@ -48,6 +56,13 @@ impl ApiHandlers {
         command_tx: tokio::sync::mpsc::UnboundedSender<DaemonCommand>,
     ) -> Self {
         self.command_tx = Some(command_tx);
+        self
+    }
+
+    /// Overrides the UID and service name used for game server control.
+    pub fn with_game_server_config(mut self, uid: u32, service: String) -> Self {
+        self.game_server_uid = uid;
+        self.game_server_service = service;
         self
     }
 
