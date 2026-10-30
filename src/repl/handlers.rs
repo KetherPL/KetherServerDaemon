@@ -329,7 +329,26 @@ impl Repl {
         match subcommand {
             "status" | "s" | "" => {
                 let st = game_server_status(uid, service);
-                println!("Game server: {} | {} | {} | PID {}", st.service, st.active_state, st.sub_state, st.main_pid);
+                let main_str = if st.main_pid > 0 {
+                    if let Some(comm) = &st.main_comm {
+                        format!("{} ({comm})", st.main_pid)
+                    } else {
+                        st.main_pid.to_string()
+                    }
+                } else {
+                    "none".to_string()
+                };
+                println!("Game server: {} | {} | {} | Main PID: {}", st.service, st.active_state, st.sub_state, main_str);
+                if let (Some(started_at), Some(uptime)) = (st.main_started_at, st.main_uptime_secs) {
+                    println!("  Main process up since: {} (uptime: {}s)", started_at.to_rfc3339(), uptime);
+                }
+                if let Some(srcds_pid) = st.srcds_pid {
+                    let srcds_name = st.srcds_comm.as_deref().unwrap_or("srcds");
+                    println!("  Srcds PID: {} ({srcds_name})", srcds_pid);
+                    if let (Some(started_at), Some(uptime)) = (st.srcds_started_at, st.srcds_uptime_secs) {
+                        println!("  Srcds up since: {} (uptime: {}s)", started_at.to_rfc3339(), uptime);
+                    }
+                }
                 if !st.description.is_empty() {
                     println!("  Description: {}", st.description);
                 }
