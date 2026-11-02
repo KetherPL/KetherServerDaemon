@@ -699,7 +699,7 @@ async fn main() -> anyhow::Result<()> {
     info!("All services started. Waiting for shutdown signal...");
     
     // Wait for shutdown signal
-    let mut restart_requested = false;
+    let mut soft_restart_requested = false;
     tokio::select! {
         res = signal::ctrl_c() => match res {
             Ok(()) => {
@@ -713,9 +713,9 @@ async fn main() -> anyhow::Result<()> {
             Some(DaemonCommand::Stop) => {
                 info!("Received stop command from REPL");
             }
-            Some(DaemonCommand::Restart) => {
-                info!("Received restart command");
-                restart_requested = true;
+            Some(DaemonCommand::SoftRestart) => {
+                info!("Received soft restart command");
+                soft_restart_requested = true;
             }
             None => {
                 warn!("REPL command channel closed");
@@ -725,14 +725,14 @@ async fn main() -> anyhow::Result<()> {
     
     // Graceful shutdown
     info!("Initiating graceful shutdown...");
-    if restart_requested {
-        // Don't cut a running download/install/update short. The HTTP restart endpoint
+    if soft_restart_requested {
+        // Don't cut a running download/install/update short. The HTTP soft-restart endpoint
         // already refuses while busy (unless forced), so this mainly covers the REPL.
         if !installer
             .wait_until_idle(tokio::time::Duration::from_secs(120))
             .await
         {
-            warn!("Map operations still running after 120 s; restarting anyway");
+            warn!("Map operations still running after 120 s; soft-restarting anyway");
         }
     }
     
@@ -749,10 +749,10 @@ async fn main() -> anyhow::Result<()> {
     
     info!("Shutdown complete");
 
-    if restart_requested {
-        info!("Restarting daemon...");
-        let err = control::restart_process();
-        error!(error = %err, "Failed to restart the daemon; exiting instead");
+    if soft_restart_requested {
+        info!("Soft-restarting daemon...");
+        let err = control::soft_restart_process();
+        error!(error = %err, "Failed to soft-restart the daemon; exiting instead");
         std::process::exit(1);
     }
     

@@ -50,7 +50,7 @@ impl ApiHandlers {
         }
     }
 
-    /// Enables lifecycle endpoints (restart) by giving the handlers the daemon command channel.
+    /// Enables soft-restart requests by giving the handlers the daemon command channel.
     pub fn with_command_sender(
         mut self,
         command_tx: tokio::sync::mpsc::UnboundedSender<DaemonCommand>,

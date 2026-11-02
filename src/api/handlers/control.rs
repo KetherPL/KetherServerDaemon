@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Daemon lifecycle endpoints: status and restart.
+//! Daemon lifecycle endpoints: status, soft restart and service restart.
 
 use std::time::Duration;
 
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{error, info};
 
 use super::ApiHandlers;
 use crate::api::error::ApiError;
@@ -16,7 +16,7 @@ use crate::repl::DaemonCommand;
 
 /// Delay between answering a restart request and starting the shutdown, so the HTTP
 /// response reaches the caller first.
-const RESTART_RESPONSE_GRACE: Duration = Duration::from_millis(300);
+const SOFT_RESTART_RESPONSE_GRACE: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
@@ -28,6 +28,8 @@ pub struct DaemonStatus {
     pub busy: Option<String>,
     /// Whether this daemon instance accepts restart requests over HTTP.
     pub restart_supported: bool,
+    /// Whether the in-place soft restart command channel is available.
+    pub soft_restart_supported: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -53,19 +55,15 @@ impl ApiHandlers {
             started_at: control::started_at(),
             uptime_secs: control::uptime_secs(),
             busy: self.installer.busy_reason().map(str::to_string),
-            restart_supported: self.command_tx.is_some(),
+            restart_supported: true,
+            soft_restart_supported: self.command_tx.is_some(),
         }))
     }
 
-    pub fn restart(
+    pub async fn restart(
         &self,
         request: RestartRequest,
     ) -> Result<Json<ApiResponse<RestartAccepted>>, ApiError> {
-        let Some(command_tx) = self.command_tx.clone() else {
-            return Err(ApiError::internal(
-                "Restart is not available in this daemon instance",
-            ));
-        };
         if !request.force
             && let Some(reason) = self.installer.busy_reason()
         {
@@ -73,11 +71,44 @@ impl ApiHandlers {
                 "Daemon is busy ({reason}); retry later or force the restart"
             )));
         }
+        let requested_at = Utc::now();
+        let uid = self.game_server_uid;
+        tokio::task::spawn_blocking(move || control::restart_service(uid))
+            .await
+            .map_err(|error| ApiError::internal(format!("Restart task failed: {error}")))?
+            .map_err(|error| {
+                error!(%error, "Daemon service restart failed");
+                ApiError::internal(error)
+            })?;
+        Ok(Json(ApiResponse::success(RestartAccepted {
+            requested_at,
+            forced: request.force,
+        })))
+    }
 
-        info!(force = request.force, "Restart requested over HTTP");
+    pub fn soft_restart(
+        &self,
+        request: RestartRequest,
+    ) -> Result<Json<ApiResponse<RestartAccepted>>, ApiError> {
+        let Some(command_tx) = self.command_tx.clone() else {
+            return Err(ApiError::internal(
+                "Soft restart is not available in this daemon instance",
+            ));
+        };
+        if !request.force
+            && let Some(reason) = self.installer.busy_reason()
+        {
+            return Err(ApiError::conflict(format!(
+                "Daemon is busy ({reason}); retry later or force the soft restart"
+            )));
+        }
+
+        info!(force = request.force, "Soft restart requested over HTTP");
         tokio::spawn(async move {
-            tokio::time::sleep(RESTART_RESPONSE_GRACE).await;
-            let _ = command_tx.send(DaemonCommand::Restart);
+            tokio::time::sleep(SOFT_RESTART_RESPONSE_GRACE).await;
+            if let Err(error) = command_tx.send(DaemonCommand::SoftRestart) {
+                error!(%error, "Failed to request daemon soft restart");
+            }
         });
         Ok(Json(ApiResponse::success(RestartAccepted {
             requested_at: Utc::now(),

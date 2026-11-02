@@ -84,7 +84,7 @@ pub struct GameServerStatus {
 /// Build the environment required for `systemctl --user` to work when the
 /// process is not running inside a login session (e.g. inside another systemd
 /// user service that doesn't inherit the D-Bus socket).
-fn systemctl_user_env(uid: u32) -> Vec<(String, String)> {
+pub(crate) fn systemctl_user_env(uid: u32) -> Vec<(String, String)> {
     vec![
         (
             "XDG_RUNTIME_DIR".to_string(),

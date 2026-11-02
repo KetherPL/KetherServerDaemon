@@ -530,16 +530,42 @@ mod tests {
         let status = parsed.data.unwrap();
         assert_eq!(status.pid, std::process::id());
         assert!(status.restart_supported);
+        assert!(status.soft_restart_supported);
         assert_eq!(status.busy.as_deref(), Some("map updates are in progress"));
     }
 
     #[tokio::test]
-    async fn daemon_restart_sends_restart_command_when_idle() {
+    async fn daemon_service_restart_refuses_busy_work_without_sending_soft_restart() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (app, _dirs) = control_test_app(true, Some(tx)).await;
+        let response = app
+            .oneshot(Request::post("/api/daemon/restart").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn daemon_status_reports_soft_restart_unavailable_without_command_channel() {
+        let (app, _dirs) = control_test_app(false, None).await;
+        let response = app
+            .oneshot(Request::get("/api/daemon/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let parsed: ApiResponse<crate::api::handlers::DaemonStatus> = json_body(response).await;
+        let status = parsed.data.unwrap();
+        assert!(status.restart_supported);
+        assert!(!status.soft_restart_supported);
+    }
+
+    #[tokio::test]
+    async fn daemon_soft_restart_sends_restart_command_when_idle() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (app, _dirs) = control_test_app(false, Some(tx)).await;
         let response = app
             .oneshot(
-                Request::post("/api/daemon/restart")
+                Request::post("/api/daemon/soft-restart")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -549,18 +575,18 @@ mod tests {
         let command = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("restart command should be sent");
-        assert!(matches!(command, Some(DaemonCommand::Restart)));
+        assert!(matches!(command, Some(DaemonCommand::SoftRestart)));
     }
 
     #[tokio::test]
-    async fn daemon_restart_refuses_while_busy_unless_forced() {
+    async fn daemon_soft_restart_refuses_while_busy_unless_forced() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (app, _dirs) = control_test_app(true, Some(tx)).await;
 
         let refused = app
             .clone()
             .oneshot(
-                Request::post("/api/daemon/restart")
+                Request::post("/api/daemon/soft-restart")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -571,7 +597,7 @@ mod tests {
 
         let forced = app
             .oneshot(
-                Request::post("/api/daemon/restart?force=true")
+                Request::post("/api/daemon/soft-restart?force=true")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -581,15 +607,15 @@ mod tests {
         let command = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("forced restart command should be sent");
-        assert!(matches!(command, Some(DaemonCommand::Restart)));
+        assert!(matches!(command, Some(DaemonCommand::SoftRestart)));
     }
 
     #[tokio::test]
-    async fn daemon_restart_unavailable_without_command_channel() {
+    async fn daemon_soft_restart_unavailable_without_command_channel() {
         let (app, _dirs) = control_test_app(false, None).await;
         let response = app
             .oneshot(
-                Request::post("/api/daemon/restart")
+                Request::post("/api/daemon/soft-restart")
                     .body(Body::empty())
                     .unwrap(),
             )

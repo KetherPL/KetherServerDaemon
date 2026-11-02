@@ -51,7 +51,7 @@ Configuration is loaded from `config.toml` (or path in `KETHER_CONFIG`). If the 
 | `compact` | Prune orphaned registry entries and reindex IDs |
 | `info <id>` | Show map details |
 | `modify <id> <field> <value>` | Edit registry field |
-| `R` / `restart` | Restart daemon in place (waits up to 120 s for running map work, then re-executes the binary with the same PID/arguments/terminal — picks up a rebuilt binary) |
+| `R` / `restart` / `soft-restart` | Soft-restart daemon in place (waits up to 120 s for running map work, then re-executes the binary with the same PID/arguments/terminal — picks up a rebuilt binary) |
 | `S` / `stop` | Stop daemon |
 
 ## HTTP API
@@ -75,7 +75,8 @@ All `/api/*` routes require `Authorization: Bearer <backend_api_key>` when
 | POST | `/api/maps/discover` | Scan addons directory |
 | POST | `/api/maps/compact` | Compact registry |
 | GET | `/api/daemon/status` | Version, PID, start time, uptime, current map work (`busy`) |
-| POST | `/api/daemon/restart` | Restart in place; refuses with 409 while map work runs unless `?force=true` |
+| POST | `/api/daemon/soft-restart` | Soft-restart in place; refuses with 409 while map work runs unless `?force=true` |
+| POST | `/api/daemon/restart` | Schedule a systemd user-service restart of `ksd.service`; refuses with 409 while map work runs unless `?force=true` |
 
 Responses use `{ "success": true, "data": ... }` or `{ "success": false, "error": "..." }`.
 

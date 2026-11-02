@@ -13,7 +13,7 @@ use crate::map_installer::MapInstallationService;
 pub enum DaemonCommand {
     Stop,
     /// Gracefully stop and re-execute the daemon in place (same PID and terminal).
-    Restart,
+    SoftRestart,
 }
 
 pub struct Repl {
@@ -142,13 +142,13 @@ impl Repl {
                                 }
                                 break;
                             }
-                            "R" | "restart" => {
+                            "R" | "restart" | "soft-restart" => {
                                 match &self.daemon_command_tx {
                                     Some(tx) => {
-                                        if let Err(err) = tx.send(DaemonCommand::Restart) {
-                                            eprintln!("Failed to request daemon restart: {err}");
+                                        if let Err(err) = tx.send(DaemonCommand::SoftRestart) {
+                                            eprintln!("Failed to request daemon soft restart: {err}");
                                         } else {
-                                            println!("Restart requested. Closing REPL...");
+                                            println!("Soft restart requested. Closing REPL...");
                                         }
                                     }
                                     None => eprintln!("Daemon command channel unavailable."),
@@ -199,7 +199,7 @@ impl Repl {
         println!("  l4d2center update|u [id|name] [--check|-c] [--force|-f] - Check or update L4D2Center maps");
         println!("  server, sv [status|start|stop|restart] - Control the L4D2 game server service");
         println!("  q, quit, exit - Exit the REPL");
-        println!("  R, restart - Restart the daemon (waits for running map operations, re-runs the binary in place)");
+        println!("  R, restart, soft-restart - Soft-restart the daemon (waits for running map operations, re-runs the binary in place)");
         println!("  S, stop - Stop the daemon");
     }
 }

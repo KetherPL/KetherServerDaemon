@@ -34,7 +34,14 @@ pub async fn daemon_restart_handler(
     axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
     axum::extract::Query(request): axum::extract::Query<RestartRequest>,
 ) -> Result<Json<ApiResponse<RestartAccepted>>, ApiError> {
-    handlers.restart(request)
+    handlers.restart(request).await
+}
+
+pub async fn daemon_soft_restart_handler(
+    axum::extract::State(handlers): axum::extract::State<Arc<ApiHandlers>>,
+    axum::extract::Query(request): axum::extract::Query<RestartRequest>,
+) -> Result<Json<ApiResponse<RestartAccepted>>, ApiError> {
+    handlers.soft_restart(request)
 }
 
 pub async fn list_maps_handler(
@@ -168,6 +175,7 @@ pub fn routes(handlers: Arc<ApiHandlers>) -> Router {
         .route("/api/maps", get(list_maps_handler))
         .route("/api/daemon/status", get(daemon_status_handler))
         .route("/api/daemon/restart", post(daemon_restart_handler))
+        .route("/api/daemon/soft-restart", post(daemon_soft_restart_handler))
         .route("/api/game-server/status", get(game_server_status_handler))
         .route("/api/game-server/start", post(game_server_start_handler))
         .route("/api/game-server/stop", post(game_server_stop_handler))
