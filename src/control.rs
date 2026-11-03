@@ -8,6 +8,7 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::process::{Command, Output};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -19,33 +20,16 @@ static STARTED: OnceLock<(Instant, DateTime<Utc>)> = OnceLock::new();
 pub const DAEMON_SERVICE: &str = "ksd.service";
 const SERVICE_RESTART_DELAY: &str = "--on-active=1s";
 
-fn service_restart_command(uid: u32) -> std::process::Command {
-    // The transient timer belongs to the user manager, so stopping ksd.service
-    // cannot kill the restart command before systemd has finished processing it.
-    let mut command = std::process::Command::new("systemd-run");
-    command.args([
-        "--user",
-        "--collect",
-        SERVICE_RESTART_DELAY,
-        "--timer-property=AccuracySec=100ms",
-        "--setenv=XDG_RUNTIME_DIR",
-        "--setenv=DBUS_SESSION_BUS_ADDRESS",
-        "--",
-        "systemctl",
-        "--user",
-        "restart",
-        DAEMON_SERVICE,
-    ]);
+fn service_restart_command(uid: u32) -> Command {
+    let mut command =
+        crate::game_server::delayed_restart_command(DAEMON_SERVICE, SERVICE_RESTART_DELAY);
     command.envs(crate::game_server::systemctl_user_env(uid));
     command
 }
 
-/// Schedule a restart through the same user manager as the game server.
-/// Returns only after the manager accepts the transient timer.
-pub fn restart_service(uid: u32) -> Result<(), String> {
-    let output = service_restart_command(uid)
-        .output()
-        .map_err(|error| format!("Failed to schedule {DAEMON_SERVICE} restart: {error}"))?;
+fn check_service_restart_output(output: std::io::Result<Output>) -> Result<(), String> {
+    let output =
+        output.map_err(|error| format!("Failed to schedule {DAEMON_SERVICE} restart: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "Failed to schedule {DAEMON_SERVICE} restart ({}): {} {}",
@@ -54,7 +38,18 @@ pub fn restart_service(uid: u32) -> Result<(), String> {
             String::from_utf8_lossy(&output.stdout),
         ));
     }
-    tracing::info!(uid, service = DAEMON_SERVICE, "Daemon service restart scheduled");
+    Ok(())
+}
+
+/// Schedule a restart through the same user manager as the game server.
+/// Returns only after the manager accepts the transient timer.
+pub fn restart_service(uid: u32) -> Result<(), String> {
+    check_service_restart_output(service_restart_command(uid).output())?;
+    tracing::info!(
+        uid,
+        service = DAEMON_SERVICE,
+        "Daemon service restart scheduled"
+    );
     Ok(())
 }
 
@@ -79,7 +74,10 @@ pub fn uptime_secs() -> u64 {
 /// Picks the executable to re-run. `/proc/self/exe` reports `"<path> (deleted)"` once the
 /// binary has been replaced on disk; in that case the path without the suffix (the new
 /// build) is used. Falls back to `argv[0]`.
-fn soft_restart_executable(current_exe: Option<PathBuf>, argv0: Option<OsString>) -> Option<PathBuf> {
+fn soft_restart_executable(
+    current_exe: Option<PathBuf>,
+    argv0: Option<OsString>,
+) -> Option<PathBuf> {
     if let Some(exe) = current_exe {
         if exe.exists() {
             return Some(exe);
@@ -107,7 +105,7 @@ pub fn soft_restart_process() -> std::io::Error {
     let Some(exe) = soft_restart_executable(std::env::current_exe().ok(), argv0) else {
         return std::io::Error::other("cannot determine the daemon executable path");
     };
-    let mut command = std::process::Command::new(exe);
+    let mut command = Command::new(exe);
     command.args(args);
 
     #[cfg(unix)]
@@ -165,18 +163,78 @@ mod tests {
         assert_eq!(command.get_program(), "systemd-run");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            ["--user", "--collect", "--on-active=1s",
-             "--timer-property=AccuracySec=100ms",
-             "--setenv=XDG_RUNTIME_DIR", "--setenv=DBUS_SESSION_BUS_ADDRESS",
-             "--", "systemctl",
-             "--user", "restart", "ksd.service"]
-                .map(std::ffi::OsStr::new)
+            [
+                "--user",
+                "--collect",
+                "--on-active=1s",
+                "--timer-property=AccuracySec=100ms",
+                "--setenv=XDG_RUNTIME_DIR",
+                "--setenv=DBUS_SESSION_BUS_ADDRESS",
+                "--",
+                "systemctl",
+                "--user",
+                "restart",
+                "ksd.service"
+            ]
+            .map(std::ffi::OsStr::new)
         );
-        let environment = command.get_envs().collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(environment[std::ffi::OsStr::new("XDG_RUNTIME_DIR")],
-                   Some(std::ffi::OsStr::new("/run/user/1234")));
-        assert_eq!(environment[std::ffi::OsStr::new("DBUS_SESSION_BUS_ADDRESS")],
-                   Some(std::ffi::OsStr::new("unix:path=/run/user/1234/bus")));
+        let environment = command
+            .get_envs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            environment[std::ffi::OsStr::new("XDG_RUNTIME_DIR")],
+            Some(std::ffi::OsStr::new("/run/user/1234"))
+        );
+        assert_eq!(
+            environment[std::ffi::OsStr::new("DBUS_SESSION_BUS_ADDRESS")],
+            Some(std::ffi::OsStr::new("unix:path=/run/user/1234/bus"))
+        );
+    }
+
+    #[test]
+    fn soft_restart_executable_returns_none_when_no_path_is_available() {
+        assert_eq!(soft_restart_executable(None, None), None);
+    }
+
+    #[test]
+    fn soft_restart_executable_uses_argv0_when_rebuilt_binary_is_missing() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let deleted = directory.path().join("missing (deleted)");
+        assert_eq!(
+            soft_restart_executable(Some(deleted), Some("./fallback".into())),
+            Some(PathBuf::from("./fallback"))
+        );
+    }
+
+    #[test]
+    fn restart_scheduler_spawn_error_preserves_message() {
+        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "scheduler unavailable");
+        assert_eq!(
+            check_service_restart_output(Err(error)),
+            Err("Failed to schedule ksd.service restart: scheduler unavailable".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_scheduler_preserves_exit_status_and_output_order() {
+        use std::os::unix::process::ExitStatusExt;
+        let failed = Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stderr: b"manager rejected restart".to_vec(),
+            stdout: b"additional output".to_vec(),
+        };
+        let expected = format!(
+            "Failed to schedule ksd.service restart ({}): manager rejected restart additional output",
+            failed.status
+        );
+        assert_eq!(check_service_restart_output(Ok(failed)), Err(expected));
+        let accepted = Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stderr: b"timer created".to_vec(),
+            stdout: Vec::new(),
+        };
+        assert_eq!(check_service_restart_output(Ok(accepted)), Ok(()));
     }
 
     #[test]
